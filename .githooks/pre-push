@@ -1,0 +1,5 @@
+#!/bin/sh
+# Runs the same checks as the GitHub workflow before anything leaves this machine.
+# Skip once with: git push --no-verify
+echo "pre-push: running npm run ci (typecheck, tests, build)"
+npm run ci || { echo "pre-push: checks failed, push stopped"; exit 1; }
