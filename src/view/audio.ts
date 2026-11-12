@@ -1,17 +1,28 @@
 // All sound is synthesized with Web Audio; there are no audio files.
 
 const MUTE_KEY = 'yukons-gold-muted';
+const MASTER_LEVEL = 0.7;
 
 export class Sfx {
   ctx: AudioContext | null = null;
   master!: GainNode;
   noise!: AudioBuffer;
   muted = false;
+  /** 0..1, set by Goth OS when the game is embedded there; 1 when standalone. */
+  siteVolume = 1;
   private last = new Map<string, number>();
   private creek?: GainNode; private engine?: GainNode; private engineOsc?: OscillatorNode;
   private nextChirp = 0;
 
-  constructor() { try { this.muted = localStorage.getItem(MUTE_KEY) === '1'; } catch { /* default on */ } }
+  constructor() {
+    try { this.muted = localStorage.getItem(MUTE_KEY) === '1'; } catch { /* default on */ }
+    // Goth OS (kylegothman.github.io/goth-os) embeds the game and forwards its volume slider.
+    window.addEventListener('message', (e: MessageEvent) => {
+      if (!/^https:\/\/kylegothman\.github\.io$|^http:\/\/localhost(:\d+)?$/.test(e.origin)) return;
+      if (!e.data || e.data.type !== 'goth-os:volume') return;
+      this.setSiteVolume(Number(e.data.volume));
+    });
+  }
 
   /** Must be called from a click: browsers only start audio on a user gesture. */
   start() {
@@ -19,7 +30,7 @@ export class Sfx {
     try {
       const AC = window.AudioContext || (window as any).webkitAudioContext; if (!AC) return;
       const ctx = this.ctx = new AC();
-      this.master = ctx.createGain(); this.master.gain.value = this.muted ? 0 : 0.7; this.master.connect(ctx.destination);
+      this.master = ctx.createGain(); this.master.gain.value = this.level(); this.master.connect(ctx.destination);
       const n = this.noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = n.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
       // creek: looping filtered noise, faded by how close the camera is to water
@@ -36,7 +47,14 @@ export class Sfx {
   }
   setMuted(m: boolean) {
     this.muted = m; try { localStorage.setItem(MUTE_KEY, m ? '1' : '0'); } catch { /* fine */ }
-    if (this.ctx) this.master.gain.setTargetAtTime(m ? 0 : 0.7, this.ctx.currentTime, 0.05);
+    if (this.ctx) this.master.gain.setTargetAtTime(this.level(), this.ctx.currentTime, 0.05);
+  }
+
+  private level() { return this.muted ? 0 : MASTER_LEVEL * this.siteVolume; }
+
+  setSiteVolume(v: number) {
+    this.siteVolume = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 1;
+    if (this.ctx) this.master.gain.setTargetAtTime(this.level(), this.ctx.currentTime, 0.05);
   }
 
   private ok(name: string, gapMs: number) { const now = performance.now(); if (now - (this.last.get(name) ?? 0) < gapMs) return false; this.last.set(name, now); return true; }
