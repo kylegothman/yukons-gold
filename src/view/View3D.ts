@@ -3,16 +3,17 @@ import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { BANDS, CLAIM_SIZE, HOPPER, ORGANIC_LOADS_PER_TILE, PUMP, TANKS, TICKS_PER_DAY, bandOf } from '../data/balance';
+import { BANDS, CLAIM_SIZE, HOPPER, STORE, VEHICLES, footprint, ORGANIC_LOADS_PER_TILE, PUMP, TANKS, TICKS_PER_DAY, bandOf } from '../data/balance';
 import { organicGrade } from '../sim/mapgen';
 import { fbm, hash2 } from '../sim/rng';
-import { Item, Unit, isContainer, isDigger, isFixture, isProcessor, isTank, isVehicle, isWash, itemById, needsWater, onGround, tileAt, unitById } from '../sim/state';
+import { Item, Unit, centerOf, isDefense, isFence, isRaider, rectOf, isContainer, isDigger, isFixture, isProcessor, isTank, isVehicle, isWash, itemById, needsWater, onGround, tileAt, unitById } from '../sim/state';
 import { step } from '../sim/step';
 import { canClaim, nextClaimCost } from '../sim/systems/economy';
-import { nearWater, wet } from '../sim/systems/machines';
+import { nearWater, wet, wetItem } from '../sim/systems/machines';
+import { canPlace, standable } from '../sim/systems/nav';
 import { ITEM_NAME, decide } from './actions';
 import { BAND_COLORS, BAND_CSS } from './bands';
-import { MinerParts, broadleafGeometry, flowerGeometry, grassGeometry, makeFlag, makeItem, makeMiner, pineGeometry, renderIcons, rockGeometry, setContents } from './models';
+import { HIP_Y, MinerParts, broadleafGeometry, flowerGeometry, grassGeometry, makeFlag, makeItem, makeMiner, pineGeometry, renderIcons, rockGeometry, setContents } from './models';
 import type { Session } from './session';
 import { Terrain, WATER_Y } from './terrain';
 
@@ -20,7 +21,7 @@ const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math
 const DAY_SHARE = 0.72; // part of each day the sun is up
 export const DAWN_OFFSET = 0.06;
 
-interface UnitView { m: MinerParts; ring: THREE.Mesh; glow: THREE.Sprite; px: number; py: number; yaw: number; label: HTMLDivElement }
+interface UnitView { m: MinerParts; ring: THREE.Mesh; glow: THREE.Sprite; px: number; py: number; yaw: number; label: HTMLDivElement; lastC: number }
 interface Float { el: HTMLDivElement; p: THREE.Vector3; born: number }
 
 export class View3D {
@@ -42,6 +43,12 @@ export class View3D {
   items = new Map<number, THREE.Group>();
   itemGlows = new Map<number, THREE.Sprite>();
   notes = new Map<number, HTMLDivElement>();
+  itemHp = new Map<number, HTMLDivElement>();
+  placeTiles: THREE.Mesh[] = [];
+  tracers: { l: THREE.Line; born: number }[] = [];
+  groups = new Map<string, number[]>();
+  lastClick = { id: -1, at: 0 };
+  fenceFrom: { x: number; y: number } | null = null;
   hoses = new THREE.Group(); hoseKey = '';
   lastDay = -1; wasPaused = true;
   flags = new Map<number, { g: THREE.Group; band: number }>();
@@ -228,7 +235,7 @@ export class View3D {
       const first = this.tileSig[i] === -1; this.tileSig[i] = sig;
       const tx = i % n, ty = (i / n) | 0;
       if (t.organicLeft < ORGANIC_LOADS_PER_TILE) {
-        this.terrain.updateTile(tx, ty);
+        this.terrain.updateTile(tx, ty, first);
         const d = this.deco.get(i);
         if (d) { for (const [im, k] of d) { im.setMatrixAt(k, zero); im.instanceMatrix.needsUpdate = true; } this.deco.delete(i); }
       }
@@ -305,22 +312,45 @@ export class View3D {
   // ------------------------------------------------------------------ input
   pick() {
     const ses = this.ses, s = ses.state, mx = this.mouse.x, my = this.mouse.y;
-    let unit: Unit | undefined, item: Item | undefined, best = Infinity;
+    let unit: Unit | undefined, foe: Unit | undefined, item: Item | undefined, best = Infinity, bestFoe = Infinity;
     const v = new THREE.Vector3();
     for (const u of s.units) {
-      const uv = this.units.get(u.id); if (!uv || u.owner !== ses.me) continue;
-      v.copy(uv.m.group.position); v.y += 0.45;
-      const p = this.screenOf(v.x, v.y, v.z), r = this.pxPerUnit(v) * (u.vehicle >= 0 ? 0.9 : 0.42), d = Math.hypot((mx - p.x) * 1.5, my - p.y);
-      if (d < r && d < best) { unit = u; best = d; }
+      const uv = this.units.get(u.id); if (!uv) continue;
+      v.copy(uv.m.group.position); v.y += 0.5;
+      const vk = u.vehicle >= 0 ? itemById(s, u.vehicle)?.kind ?? '' : '';
+      const p = this.screenOf(v.x, v.y, v.z), r = this.pxPerUnit(v) * (vk ? 0.55 * Math.max(...footprint(vk)) + 0.3 : 0.55), d = Math.hypot((mx - p.x) * 1.4, my - p.y);
+      if (u.owner === ses.me) { if (d < r && d < best) { unit = u; best = d; } }
+      else if (d < r && d < bestFoe) { foe = u; bestFoe = d; }
     }
     best = Infinity;
     for (const it of s.items) {
       const g = this.items.get(it.id); if (!g || !onGround(it) || it.driver >= 0) continue;
+      // Anything that covers ground is picked by the ground under the cursor; small loose gear by its picture.
+      if (isFixture(it.kind) && this.hit.ok) { const [x0, y0, x1, y1] = rectOf(it); if (this.hit.tx >= x0 && this.hit.tx <= x1 && this.hit.ty >= y0 && this.hit.ty <= y1) { item = it; best = -1; continue; } }
       v.copy(g.position); v.y += isFixture(it.kind) ? 0.3 : 0.12;
-      const p = this.screenOf(v.x, v.y, v.z), r = this.pxPerUnit(v) * (isFixture(it.kind) ? 0.5 : 0.3), d = Math.hypot(mx - p.x, my - p.y);
+      const p = this.screenOf(v.x, v.y, v.z), r = this.pxPerUnit(v) * (isFixture(it.kind) ? 0.5 * Math.max(...footprint(it.kind)) : 0.34), d = Math.hypot(mx - p.x, my - p.y);
       if (d < r && d < best) { item = it; best = d; }
     }
-    return { unit, item, tx: this.hit.tx, ty: this.hit.ty, fx: this.hit.fx, fy: this.hit.fy, ok: this.hit.ok };
+    return { unit, foe, item, tx: this.hit.tx, ty: this.hit.ty, fx: this.hit.fx, fy: this.hit.fy, ok: this.hit.ok };
+  }
+  /** The tiles a line of fence would cover from where the drag began to the cursor: straight along the longer side. */
+  fenceLine(): [number, number][] {
+    const a = this.fenceFrom, out: [number, number][] = [];
+    if (!a) return [[this.hit.tx, this.hit.ty]];
+    const dx = this.hit.tx - a.x, dy = this.hit.ty - a.y, along = Math.abs(dx) >= Math.abs(dy), n = Math.min(40, Math.max(Math.abs(dx), Math.abs(dy)));
+    for (let i = 0; i <= n; i++) out.push(along ? [a.x + Math.sign(dx) * i, a.y] : [a.x, a.y + Math.sign(dy) * i]);
+    return out;
+  }
+  /** Is the thing being placed allowed on this tile? People need standing room; gear needs its whole footprint clear. */
+  placeOk(kind: string, x: number, y: number, ignore = -1) {
+    const s = this.ses.state;
+    return kind === 'worker' || kind === 'guard' ? standable(s, x, y) && !tileAt(s, x, y)?.water : !isFixture(kind as never) ? !!tileAt(s, x, y) : canPlace(s, kind, x, y, ignore);
+  }
+  /** Top-left tile for a footprint so the piece sits centred under the cursor. */
+  placeOrigin(kind: string): [number, number] { const [w, h] = footprint(kind); return [Math.floor(this.hit.fx - (w - 1) / 2), Math.floor(this.hit.fy - (h - 1) / 2)]; }
+  firework(x: number, y: number, z: number) {
+    this.burst(x, y + 0.7, z, 70, 0xffd24a, 3.4, 4.4); this.burst(x, y + 0.7, z, 40, 0xfff3b0, 2.2, 3.4); this.burst(x, y + 0.9, z, 30, 0xffa32a, 4.4, 2.6);
+    this.ping(x, z, 0xffd24a);
   }
   castGround() {
     const ndc = new THREE.Vector2(this.mouse.x / window.innerWidth * 2 - 1, -(this.mouse.y / window.innerHeight) * 2 + 1);
@@ -333,6 +363,7 @@ export class View3D {
 
   bindInput(el: HTMLCanvasElement) {
     el.addEventListener('contextmenu', e => e.preventDefault());
+    document.addEventListener('hud-look', e => { const d = (e as CustomEvent).detail; this.target.set(d.x, 0, d.y); });
     el.addEventListener('pointermove', e => { this.mouse.x = e.clientX; this.mouse.y = e.clientY; this.mouse.inside = true; if (this.panning) this.panBy(-e.movementX, -e.movementY); });
     el.addEventListener('pointerleave', () => { this.mouse.inside = false; });
     el.tabIndex = 0; el.style.outline = 'none';   // focusable, so keys work when the game sits in a frame on another page
@@ -371,7 +402,26 @@ export class View3D {
     else if (k === 'b') document.dispatchEvent(new CustomEvent('hud-store'));
     else if (k === 'h') document.dispatchEvent(new CustomEvent('hud-help'));
     else if (k === ' ') { ses.paused = !ses.paused; e.preventDefault(); }
-    else if (k === '1') { ses.speed = 1; ses.paused = false; } else if (k === '2') { ses.speed = 2; ses.paused = false; } else if (k === '3') { ses.speed = 4; ses.paused = false; }
+    else if (k >= '1' && k <= '9') {
+      // Control groups, StarCraft style: Ctrl+number sets one, the number recalls it, twice jumps there.
+      const own = [...ses.selUnits].filter(id => ses.state.units.some(u => u.id === id && u.owner === ses.me));
+      if (e.ctrlKey || e.metaKey) { if (own.length) { this.groups.set(k, own); ses.onToast(`Group ${k} set`); } e.preventDefault(); }
+      else if (this.groups.has(k)) {
+        const ids = this.groups.get(k)!.filter(id => ses.state.units.some(u => u.id === id));
+        const again = ids.length > 0 && ids.every(id => ses.selUnits.has(id)) && ses.selUnits.size === ids.length;
+        ses.selUnits.clear(); ids.forEach(id => ses.selUnits.add(id)); ses.selItem = -1;
+        if (again) { const u = ses.state.units.find(q => q.id === ids[0]); if (u) this.target.set(u.x, 0, u.y); }
+      }
+      else if (k === '1') { ses.speed = 1; ses.paused = false; } else if (k === '2') { ses.speed = 2; ses.paused = false; } else if (k === '3') { ses.speed = 4; ses.paused = false; }
+    }
+    else if (k === 'x') ses.state.units.filter(u => ses.selUnits.has(u.id) && u.owner === ses.me).forEach(u => { if (u.role === 'hand') ses.send({ c: 'job', p: ses.me, units: [u.id], job: null }); else ses.send({ c: 'move', p: ses.me, units: [u.id], x: u.x, y: u.y }); })
+    else if (k === 'tab') {
+      // Next hand with nothing to do.
+      e.preventDefault();
+      const idle = ses.state.units.filter(u => u.owner === ses.me && u.role === 'hand' && !u.job && !u.queue.length && u.vehicle < 0);
+      if (!idle.length) ses.onToast('Every hand has a job');
+      else { const cur = idle.findIndex(u => ses.selUnits.has(u.id)), u = idle[(cur + 1) % idle.length]; ses.selUnits.clear(); ses.selUnits.add(u.id); ses.selItem = -1; this.target.set(u.x, 0, u.y); }
+    }
     else if (k === '=' || k === '+') this.dist = Math.max(8, this.dist * 0.87); else if (k === '-') this.dist = Math.min(90, this.dist * 1.15);
     else if (k === 'q') this.yawGoal += Math.PI / 2; else if (k === 'e') this.yawGoal -= Math.PI / 2;
     else if (k === 'f') { const b = ses.boss; this.target.set(b.x, 0, b.y); ses.selUnits.clear(); ses.selUnits.add(b.id); }
@@ -381,12 +431,13 @@ export class View3D {
     const ses = this.ses;
     if (!ses.started || ses.state.over) return;
     if (e.button === 1) { this.panning = true; return; }
-    if (e.button === 0) { this.drag = { x: e.clientX, y: e.clientY }; return; }
+    if (e.button === 0) { this.drag = { x: e.clientX, y: e.clientY }; this.fenceFrom = ses.mode === 'place' && isFence(String(ses.pending) as never) && this.hit.ok ? { x: this.hit.tx, y: this.hit.ty } : null; return; }
     if (e.button === 2) {
       if (ses.mode) { this.setMode(''); return; }
       const hit = this.pick(); if (!hit.ok && !hit.item) return;
       let strong = false, any = false;
-      const ids = [...ses.selUnits];
+      const ids = [...ses.selUnits].filter(id => ses.state.units.some(u => u.id === id && u.owner === ses.me));
+      if (hit.foe && ids.length) { ses.send({ c: 'move', p: ses.me, units: ids, x: hit.foe.x, y: hit.foe.y }); this.ping(hit.foe.x, hit.foe.y, 0xff5a4a); return; }
       ids.forEach((id, i) => {
         const u = ses.state.units.find(x => x.id === id); if (!u) return;
         const a = decide(ses, u, hit.tx, hit.ty, hit.fx, hit.fy, hit.item, e.shiftKey);
@@ -404,11 +455,12 @@ export class View3D {
     if (e.button === 1) { this.panning = false; return; }
     if (e.button !== 0 || !this.drag) return;
     const d = this.drag; this.drag = null; this.boxEl.style.display = 'none';
+    const from = this.fenceFrom; this.fenceFrom = null;
     if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 8 && !ses.mode) {
       const x0 = Math.min(d.x, e.clientX), x1 = Math.max(d.x, e.clientX), y0 = Math.min(d.y, e.clientY), y1 = Math.max(d.y, e.clientY);
       if (!e.shiftKey) ses.selUnits.clear();
       ses.selItem = -1;
-      for (const [id, v] of this.units) { const p = this.screenOf(v.m.group.position.x, v.m.group.position.y + 0.4, v.m.group.position.z); if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) ses.selUnits.add(id); }
+      for (const [id, v] of this.units) { if (s.units.find(u => u.id === id)?.owner !== ses.me) continue; const p = this.screenOf(v.m.group.position.x, v.m.group.position.y + 0.4, v.m.group.position.z); if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) ses.selUnits.add(id); }
       return;
     }
     const hit = this.pick();
@@ -428,25 +480,48 @@ export class View3D {
     }
     if (ses.mode === 'place') {
       if (!hit.ok) return;
-      ses.send({ c: 'buy', p: ses.me, what: String(ses.pending), x: hit.tx, y: hit.ty });
+      const kind = String(ses.pending), price = STORE.find(x => x.id === kind)?.price ?? 0;
+      if (isFence(kind as never)) {
+        // Click for one panel, or drag out a run of them. Fencing stays in hand until Esc or a right-click.
+        this.fenceFrom = from; const line = this.fenceLine(); this.fenceFrom = null;
+        let cash = ses.player.cash, n = 0;
+        for (const [x, y] of line) { if (!this.placeOk(kind, x, y) || cash < price) continue; ses.send({ c: 'buy', p: ses.me, what: kind, x, y }); cash -= price; n++; }
+        if (!n) ses.onToast(cash < price ? 'Not enough cash' : 'Something is already there');
+        return;
+      }
+      const [x, y] = this.placeOrigin(kind);
+      if (!this.placeOk(kind, x, y)) { ses.onToast(kind === 'worker' || kind === 'guard' ? 'Nobody can stand there' : 'Something is already there'); ses.sfx.play('error'); return; }
+      ses.send({ c: 'buy', p: ses.me, what: kind, x, y });
       if (!e.shiftKey) this.setMode('');
       return;
     }
     if (ses.mode === 'move') {
       if (!hit.ok) return;
-      const u = s.units.find(x => ses.selUnits.has(x.id) && x.boss) ?? s.units.find(x => ses.selUnits.has(x.id)) ?? ses.boss;
-      ses.send({ c: 'relocate', p: ses.me, unit: u.id, item: Number(ses.pending), x: hit.tx, y: hit.ty });
+      const moving = itemById(s, Number(ses.pending)), kind = moving?.kind ?? '', [x, y] = this.placeOrigin(kind);
+      if (!moving || !this.placeOk(kind, x, y, moving.id)) { ses.onToast('Something is already there'); ses.sfx.play('error'); return; }
+      const u = s.units.find(q => ses.selUnits.has(q.id) && q.boss) ?? s.units.find(q => ses.selUnits.has(q.id) && q.owner === ses.me) ?? ses.boss;
+      ses.send({ c: 'relocate', p: ses.me, unit: u.id, item: moving.id, x, y });
       this.ping(hit.fx, hit.fy, 0xf2c14e); this.setMode('');
       return;
     }
-    if (hit.unit) { if (!e.shiftKey) ses.selUnits.clear(); ses.selUnits.add(hit.unit.id); ses.selItem = -1; }
-    else if (hit.item) ses.selItem = hit.item.id;
-    else ses.selItem = -1;
+    // Plain click: one thing selected at a time, as in StarCraft. Shift adds or removes a unit; a double click takes every unit of that kind on screen.
+    if (hit.unit) {
+      const now = performance.now(), twice = this.lastClick.id === hit.unit.id && now - this.lastClick.at < 350; this.lastClick = { id: hit.unit.id, at: now };
+      ses.selItem = -1;
+      if (twice) {
+        ses.selUnits.clear();
+        for (const [id, v] of this.units) { const q = s.units.find(z => z.id === id); if (!q || q.owner !== ses.me || q.role !== hit.unit.role) continue; const p = this.screenOf(v.m.group.position.x, v.m.group.position.y + 0.4, v.m.group.position.z); if (!p.behind && p.x >= 0 && p.y >= 0 && p.x <= window.innerWidth && p.y <= window.innerHeight) ses.selUnits.add(id); }
+      } else if (e.shiftKey) { if (ses.selUnits.has(hit.unit.id)) ses.selUnits.delete(hit.unit.id); else ses.selUnits.add(hit.unit.id); }
+      else { ses.selUnits.clear(); ses.selUnits.add(hit.unit.id); }
+    }
+    else if (hit.item) { ses.selItem = hit.item.id; ses.selUnits.clear(); }
+    else { ses.selItem = -1; if (!e.shiftKey) ses.selUnits.clear(); }
   }
 
   updateHover() {
     const ses = this.ses, s = ses.state, T = this.terrain;
     this.hover.visible = this.claimPreview.visible = false;
+    for (const m of this.placeTiles) m.visible = false;
     let hint = '';
     if (this.ghost) this.ghost.visible = false;
     if (!ses.started || s.over || !this.mouse.inside) { this.hintEl.style.display = 'none'; return; }
@@ -464,14 +539,32 @@ export class View3D {
       if (ses.mode === 'testpan') hint = !t.water ? 'Click to test pan here' : '';
       else if (ses.mode === 'drill') hint = t.water ? '' : t.drilled ? 'Already core-sampled' : 'Click to core-drill here: $100 for the grade of all five layers';
       else if (ses.mode === 'place' || ses.mode === 'move') {
-        const kind = ses.mode === 'place' ? String(ses.pending) : itemById(s, Number(ses.pending))?.kind ?? '';
-        if (kind && this.ghostKind !== kind) { if (this.ghost) this.world.remove(this.ghost); this.ghost = makeItem(kind); this.ghostKind = kind; this.ghost.traverse(o => { const m = o as THREE.Mesh; if (m.material) { m.material = (m.material as THREE.Material).clone(); (m.material as THREE.Material).transparent = true; (m.material as THREE.Material).opacity = 0.55; m.castShadow = false; } }); this.world.add(this.ghost); }
-        if (this.ghost) { this.ghost.visible = true; this.ghost.position.set(hit.tx + 0.5, this.itemGround(hit.tx + 0.5, hit.ty + 0.5), hit.ty + 0.5); }
-        const dry = (kind === 'pan' || kind === 'sluice' || kind === 'washplant') && !wet(s, hit.tx, hit.ty, ses.me);
-        const pumpDry = kind === 'pump' && !nearWater(s, hit.tx, hit.ty);
-        hint = (ses.mode === 'place' ? `Click to have the ${ITEM_NAME[kind]} delivered here` : `Click to move the ${ITEM_NAME[kind]} here`) + (dry ? ' (it only works beside the creek or near a pump)' : pumpDry ? ' (a pump has to sit beside the creek)' : '');
+        const moving = ses.mode === 'move' ? itemById(s, Number(ses.pending)) : undefined;
+        const kind = ses.mode === 'place' ? String(ses.pending) : moving?.kind ?? '', person = kind === 'worker' || kind === 'guard';
+        this.hover.visible = false;
+        const [w, h] = footprint(kind), [ox, oy] = this.placeOrigin(kind);
+        const tiles: [number, number][] = isFence(kind as never) && ses.mode === 'place' ? this.fenceLine() : [];
+        if (!tiles.length) for (let y = oy; y < oy + h; y++) for (let x = ox; x < ox + w; x++) tiles.push([x, y]);
+        const whole = isFence(kind as never) ? true : this.placeOk(kind, ox, oy, moving?.id ?? -1);
+        tiles.forEach(([x, y], i) => {
+          let m = this.placeTiles[i];
+          if (!m) { m = new THREE.Mesh(drapeGeometry(1), (this.hover.material as THREE.Material).clone()); (m.material as THREE.MeshBasicMaterial).opacity = 0.5; this.world.add(m); this.placeTiles[i] = m; }
+          if (!tileAt(s, x, y)) return;
+          // Each square shows on its own whether it is free.
+          const free = isFence(kind as never) || person ? this.placeOk(kind, x, y) : whole || (canPlace(s, 'bucket', x, y) && !s.tiles[y * s.size + x].water && this.placeOk('tank', x, y, moving?.id ?? -1));
+          drape(m, T, x, y, 1); m.visible = true; (m.material as THREE.MeshBasicMaterial).color.setHex(free ? 0x6dff7a : 0xff5040);
+        });
+        if (kind && !person && this.ghostKind !== kind) { if (this.ghost) this.world.remove(this.ghost); this.ghost = makeItem(kind); this.ghostKind = kind; this.ghost.traverse(o => { const m = o as THREE.Mesh; if (m.material) { m.material = (m.material as THREE.Material).clone(); (m.material as THREE.Material).transparent = true; (m.material as THREE.Material).opacity = 0.55; m.castShadow = false; } }); this.world.add(this.ghost); }
+        if (this.ghost && !person) { const gx = ox + w / 2, gz = oy + h / 2; this.ghost.visible = true; this.ghost.position.set(gx, this.itemGround(gx, gz), gz); this.ghost.rotation.y = kind in VEHICLES && w > 1 ? Math.PI / 2 : 0; }
+        const dry = (kind === 'pan' || kind === 'sluice' || kind === 'washplant') && !wetItem(s, { kind, x: ox, y: oy, owner: ses.me } as Item);
+        const pumpDry = kind === 'pump' && !nearWater(s, ox, oy);
+        const name = person ? (kind === 'guard' ? 'guard' : 'hired hand') : ITEM_NAME[kind] ?? kind;
+        hint = !whole ? (person ? 'Nobody can stand there' : 'Blocked: every square it covers has to be free')
+          : isFence(kind as never) ? `Click to set a panel, or drag out a run of fence (${tiles.length} x $${STORE.find(x => x.id === kind)!.price}). Esc when done`
+          : (ses.mode === 'place' ? (person ? `Click where the ${name} should start` : `Click to have the ${name} delivered here${w * h > 1 ? ` (${w} x ${h} tiles)` : ''}`) : `Click to move the ${name} here`) + (dry ? ' (it only works beside the creek or near a pump)' : pumpDry ? ' (a pump has to sit beside the creek)' : '');
       }
-      else if (hit.unit) hint = hit.unit.boss ? 'You (left-click to select)' : `${hit.unit.name}: ${hit.unit.status}`;
+      else if (hit.foe) hint = `${hit.foe.name}: ${hit.foe.status}${[...ses.selUnits].length ? ' (right-click to send your people at them)' : ''}`;
+      else if (hit.unit) hint = hit.unit.boss ? 'Yukon (left-click to select)' : `${hit.unit.name}: ${hit.unit.status}`;
       else if (ses.selUnits.size) {
         const u = s.units.find(x => ses.selUnits.has(x.id));
         if (u) { const a = decide(ses, u, hit.tx, hit.ty, hit.fx, hit.fy, hit.item, this.keys.has('shift')); if (a.strong || hit.item || a.label.length > 12) hint = 'Right-click: ' + a.label; }
@@ -490,6 +583,22 @@ export class View3D {
   afterStep() {
     const ses = this.ses, s = ses.state;
     for (const e of s.events) {
+      // Fights are everyone's business, whoever threw the punch.
+      if (e.type === 'raid' || e.type === 'shot' || e.type === 'hit' || e.type === 'death' || e.type === 'wreck' || e.type === 'steal') {
+        const ex = e.x ?? 0, ez = e.y ?? 0, ey = this.ground(ex, ez);
+        const near = 1 - smooth(this.dist * 0.35, this.dist * 1.1 + 6, Math.hypot(ex - this.target.x, ez - this.target.z));
+        ses.sfx.play(e.type, e.type === 'raid' || e.type === 'steal' ? 1 : Math.max(near, e.type === 'death' ? 0.25 : 0));
+        if (e.type === 'raid') { ses.onToast(e.text!); document.dispatchEvent(new CustomEvent('hud-raid', { detail: { x: ex, y: ez } })); }
+        else if (e.type === 'steal') { ses.onToast(e.text!); this.floatText(ex, ey + 1.2, ez, '-$' + Math.round(e.amount!).toLocaleString(), '#ff6b5a', 22); }
+        else if (e.type === 'hit') this.burst(ex, ey + 0.6, ez, 5, 0xffb347, 0.8, 1.2);
+        else if (e.type === 'wreck') { this.burst(ex, ey + 0.5, ez, 40, 0x2e2e2e, 1.6, 2.6); this.burst(ex, ey + 0.5, ez, 16, 0xff8a3a, 1.2, 1.8); if (e.owner === ses.me) ses.onToast(`${ITEM_NAME[e.text!] ?? e.text} wrecked`); }
+        else if (e.type === 'death') { this.firework(ex, ey, ez); if (e.owner !== ses.me) this.floatText(ex, ey + 1.3, ez, e.text + ' down', '#ffe27a', 16); }
+        else if (e.type === 'shot') {
+          const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(ex, ey + (e.owner === ses.me ? 0.75 : 0.7), ez), new THREE.Vector3(e.x2!, this.ground(e.x2!, e.y2!) + 0.55, e.y2!)]);
+          const l = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xfff0b0, transparent: true, opacity: 0.9, fog: false })); this.world.add(l); this.tracers.push({ l, born: performance.now() });
+        }
+        continue;
+      }
       if (e.owner !== undefined && e.owner !== ses.me) continue;
       if (e.type === 'toast' || e.type === 'buy' || e.type === 'hire') ses.onToast(e.text!);
       const x = (e.x ?? 0) + 0.5, z = (e.y ?? 0) + 0.5, y = this.ground(x, z);
@@ -550,6 +659,7 @@ export class View3D {
     // The sky clock runs slightly ahead so each new day begins just after sunrise.
     this.dayF = ((s.tick + (ses.paused || s.over ? 0 : this.acc / 100)) / TICKS_PER_DAY + DAWN_OFFSET) % 1;
 
+    this.terrain.animate(dt); this.terrain.flush();
     this.syncUnits(alpha, dt);
     this.syncItems();
     this.updateSky(dt);
@@ -572,47 +682,116 @@ export class View3D {
   }
 
   syncUnits(alpha: number, dt: number) {
-    const ses = this.ses, s = ses.state, t = this.uTime.value;
+    const ses = this.ses, s = ses.state, t = this.uTime.value, k = Math.min(1, dt * 14), raidOn = s.units.some(isRaider);
     for (const u of s.units) {
       let v = this.units.get(u.id);
+      const foe = isRaider(u);
       if (!v) {
-        const m = makeMiner(u.boss ? 'boss' : (u.id % 3) as 0 | 1 | 2);
-        const ring = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.37, 28).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0x9be37a, transparent: true, opacity: 0.95, depthWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
+        const m = makeMiner(u.role === 'boss' ? 'boss' : u.role === 'hand' ? (u.id % 3) as 0 | 1 | 2 : u.role);
+        const ring = new THREE.Mesh(new THREE.RingGeometry(0.3, 0.37, 28).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: foe ? 0xff5a4a : u.role === 'guard' ? 0x7ab8ff : 0x9be37a, transparent: true, opacity: foe ? 0.7 : 0.95, depthWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: -3, polygonOffsetUnits: -3 }));
         this.world.add(ring);
         const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: 0xffb55a, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })); glow.scale.setScalar(1.5); glow.position.y = 0.35; m.group.add(glow);
-        const label = document.createElement('div'); label.className = 'ulabel'; label.innerHTML = '<b></b><div class="ubar"><i></i></div>'; this.labels.appendChild(label);
+        const label = document.createElement('div'); label.className = 'ulabel'; label.innerHTML = '<b></b><div class="ubar"><i></i></div><div class="hbar"><i></i></div>'; this.labels.appendChild(label);
         this.world.add(m.group);
-        v = { m, ring, glow, px: u.x, py: u.y, yaw: 0, label }; this.units.set(u.id, v);
-        if (!u.boss) this.burst(u.x, this.ground(u.x, u.y) + 0.5, u.y, 24, 0x9be37a);
+        v = { m, ring, glow, px: u.x, py: u.y, yaw: 0, label, lastC: 0 }; this.units.set(u.id, v);
+        if (!u.boss && !foe) this.burst(u.x, this.ground(u.x, u.y) + 0.5, u.y, 24, 0x9be37a);
       }
       const x = v.px + (u.x - v.px) * alpha, z = v.py + (u.y - v.py) * alpha, g = v.m.group;
-      const dx = u.x - v.px, dz = u.y - v.py;
-      // face the way they walk, or the thing they are working on
-      let want = v.yaw;
+      const dx = u.x - v.px, dz = u.y - v.py, o = u.queue[0];
+      const working = u.workTotal > 0 && !foe, carrying = u.carrying >= 0, P = v.m;
+      // face the way they walk, or the thing they are working on or fighting
+      let want = v.yaw, fx = x, fz = z;
       if (u.moving && (dx || dz)) want = Math.atan2(dx, dz);
-      else { const o = u.queue[0]; if (o && u.workTotal > 0) { let tx = x, tz = z; if ('tx' in o) { tx = o.tx + 0.5; tz = o.ty + 0.5; } else if ('station' in o) { const st = itemById(s, o.station); if (st) { tx = st.x + 0.5; tz = st.y + 0.5; } } if (Math.hypot(tx - x, tz - z) > 0.05) want = Math.atan2(tx - x, tz - z); } }
+      else {
+        if (o && working) { if ('tx' in o) { fx = o.tx + 0.5; fz = o.ty + 0.5; } else if ('station' in o) { const st = itemById(s, o.station); if (st) [fx, fz] = centerOf(st); } }
+        else if (u.cool > 0) { const near = s.units.reduce<Unit | null>((b, q) => isRaider(q) !== foe && (!b || Math.hypot(q.x - u.x, q.y - u.y) < Math.hypot(b.x - u.x, b.y - u.y)) ? q : b, null); if (near && Math.hypot(near.x - u.x, near.y - u.y) < 9) { fx = near.x; fz = near.y; } }
+        if (Math.hypot(fx - x, fz - z) > 0.05) want = Math.atan2(fx - x, fz - z);
+      }
       let dy = want - v.yaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy)); v.yaw += dy * Math.min(1, dt * 12);
       const wading = this.terrain.heightAt(x, z) < -0.1;
       g.position.set(x, this.ground(x, z) - (wading ? 0.08 : 0), z); g.rotation.y = v.yaw;
       const driving = u.vehicle >= 0; g.visible = !driving;
-      v.ring.position.set(x, g.position.y + 0.05, z); const vk = driving ? itemById(s, u.vehicle)?.kind ?? '' : ''; v.ring.scale.setScalar(driving ? (vk === 'excavator4' ? 4.2 : vk === 'excavator3' ? 3.4 : vk === 'excavator2' ? 2.8 : 2.4) : 1);
-      const working = u.workTotal > 0, carrying = u.carrying >= 0, ph = t * 11 + u.id, P = v.m;
-      const sw = u.moving ? Math.sin(ph) * 0.75 : 0;
-      P.legL.rotation.x = sw; P.legR.rotation.x = -sw;
-      P.torso.position.y = 0.3 + (u.moving ? Math.abs(Math.cos(ph)) * 0.025 : Math.sin(t * 2 + u.id) * 0.006);
-      if (working) { const a = -1.15 + Math.sin(t * 13 + u.id) * 0.55; P.armL.rotation.x = a; P.armR.rotation.x = a; P.torso.rotation.x = 0.28 + Math.sin(t * 13 + u.id) * 0.08; }
-      else { P.torso.rotation.x = u.moving ? 0.08 : 0; P.armL.rotation.x = carrying ? -1.25 : -sw; P.armR.rotation.x = carrying ? -1.25 : sw; }
-      v.ring.visible = ses.selUnits.has(u.id);
-      // label: progress bar and status mark
-      const p = this.screenOf(g.position.x, g.position.y + (driving ? 1.25 : 1.02), g.position.z), L = v.label;
-      const idle = !u.boss && !working && !u.moving && u.queue.length === 0;
-      if (p.behind || (!working && !idle)) L.style.display = 'none';
+      const vk = driving ? itemById(s, u.vehicle)?.kind ?? '' : '';
+      v.ring.position.set(x, g.position.y + 0.05, z); v.ring.scale.setScalar(driving ? Math.max(...footprint(vk)) * 1.9 : foe ? 0.8 : 1);
+
+      // ---- pose: every joint eases toward what the activity calls for
+      const ph = t * 10 + u.id * 1.7, sw = u.moving ? Math.sin(ph) * 0.7 : 0;
+      let lL = sw, lR = -sw, kL = u.moving ? 0.15 + Math.max(0, Math.sin(ph + 2.2)) * 0.9 : 0, kR = u.moving ? 0.15 + Math.max(0, Math.sin(ph + 2.2 + Math.PI)) * 0.9 : 0;
+      let aL = -sw * 0.6, aR = sw * 0.6, eL = u.moving ? -0.45 : -0.12, eR = eL, zIn = 0, lean = u.moving ? 0.1 : 0, twist = 0, drop = 0;
+      let bob = u.moving ? Math.abs(Math.cos(ph)) * 0.022 : Math.sin(t * 2 + u.id) * 0.005;
+      let tool: keyof MinerParts['tools'] | '' = '';
+      const stKind = o && 'station' in o ? itemById(s, o.station)?.kind : undefined;
+      if (working && o?.t === 'dig') {
+        // Half the job with the pick, breaking ground; half with the shovel, lifting it out.
+        const usePick = 1 - u.workLeft / u.workTotal < 0.5, c = (t * 0.85 + u.id * 0.37) % 1;
+        zIn = 0.32; kL = kR = 0.25; lL = lR = -0.12; drop = 0.02;
+        if (usePick) {
+          tool = 'pick';
+          if (c < 0.55) { const e = smooth(0, 0.55, c); aL = aR = -0.7 - e * 2.0; eL = eR = -0.2 - e * 0.5; lean = 0.25 - e * 0.4; }
+          else if (c < 0.7) { const e = ((c - 0.55) / 0.15) ** 2; aL = aR = -2.7 + e * 2.0; eL = eR = -0.7 + e * 0.6; lean = -0.15 + e * 0.7; }
+          else { aL = aR = -0.7; eL = eR = -0.1 - (1 - c) * 0.3; lean = 0.55 - (c - 0.7) * 1.0; }
+        } else {
+          tool = 'shovel';
+          if (c < 0.35) { const e = smooth(0, 0.35, c); aL = aR = -1.0 + e * 0.55; eL = eR = -0.5 + e * 0.3; lean = 0.25 + e * 0.35; }
+          else if (c < 0.7) { const e = smooth(0.35, 0.7, c); aL = aR = -0.45 - e * 0.9; eL = eR = -0.2 - e * 0.5; lean = 0.6 - e * 0.45; twist = e * 0.9; }
+          else { const e = smooth(0.7, 1, c); aL = aR = -1.35 + e * 0.35; eL = eR = -0.7 + e * 0.2; lean = 0.15 + e * 0.1; twist = 0.9 * (1 - e); }
+        }
+        if (v.lastC < 0.7 && c >= 0.7) {
+          const sx = Math.sin(v.yaw), sz = Math.cos(v.yaw);
+          if (usePick) this.burst(x + sx * 0.45, g.position.y + 0.08, z + sz * 0.45, 7, 0x8a6a45, 0.9, 1.3);
+          else this.burst(x + sx * 0.2 + sz * 0.5, g.position.y + 0.55, z + sz * 0.2 - sx * 0.5, 9, 0x9c7a4e, 0.7, 1.0);
+          ses.sfx.play('dig', (1 - smooth(this.dist * 0.35, this.dist * 1.1 + 6, Math.hypot(x - this.target.x, z - this.target.z))) * 0.5);
+        }
+        v.lastC = c;
+      } else if (working && (o?.t === 'testpan' || (o?.t === 'operate' && stKind === 'pan'))) {
+        // Down on the haunches, swirling the pan.
+        tool = 'pan'; lL = lR = -1.35; kL = kR = 1.9; drop = 0.22; aL = aR = -0.85; eL = eR = -0.55; zIn = 0.3; lean = 0.42;
+        P.tools.pan.position.set(Math.sin(t * 7 + u.id) * 0.04, 0.02, 0.3 + Math.cos(t * 7 + u.id) * 0.035); P.tools.pan.rotation.set(Math.cos(t * 7 + u.id) * 0.22, 0, Math.sin(t * 7 + u.id) * 0.22);
+      } else if (working && o?.t === 'operate' && stKind === 'sieve') {
+        // Rocking the sieve box side to side.
+        aL = aR = -1.15; eL = eR = -0.45; zIn = 0.15; lean = 0.22; twist = Math.sin(t * 9 + u.id) * 0.28; kL = kR = 0.2; lL = lR = -0.1;
+      } else if (working && o?.t === 'operate') {
+        // Feeding the sluice a shovelful at a time.
+        const c = (t * 0.9 + u.id * 0.3) % 1, e = Math.sin(c * Math.PI);
+        tool = 'shovel'; zIn = 0.3; aL = aR = -0.6 - e * 0.7; eL = eR = -0.3 - e * 0.3; lean = 0.35 - e * 0.2; twist = e * 0.5;
+      } else if (working) { aL = aR = -1.05 + Math.sin(t * 9 + u.id) * 0.2; eL = eR = -0.5; lean = 0.25; }
+      else if (carrying) { aL = aR = -0.85; eL = eR = -0.75; zIn = 0.12; }
+      if (u.role === 'guard') {
+        tool = 'rifle';
+        if (u.status === 'Firing') { aR = -1.5; eR = -0.05; aL = -1.25; eL = -0.5; zIn = 0.3; lean = 0.05; if (u.cool > 7) aR -= 0.12; }
+        else if (!u.moving) { aR = -0.35; eR = -1.1; aL = -0.5; eL = -0.9; zIn = 0.35; }
+      } else if (u.role === 'bandit') {
+        tool = 'club';
+        if (u.cool > 0) { const c = 1 - u.cool / 10; aR = c < 0.35 ? -0.8 - c / 0.35 * 1.7 : -2.5 + (c - 0.35) / 0.65 * 2.1; eR = -0.4; lean = c < 0.35 ? -0.1 : 0.3; }
+        else if (!u.moving) { aR = -0.5; eR = -0.9; }
+      } else if (u.role === 'thief') {
+        if (u.loot > 0) { aL = aR = -0.2; eL = eR = -1.6; lean = 0.25; }
+        else if (u.status.startsWith('Robbing')) { lL = lR = -1.35; kL = kR = 1.9; drop = 0.22; aL = aR = -1.0; eL = eR = -0.4; lean = 0.4; }
+      } else if (u.boss && u.cool > 0 && !working) {
+        const c = 1 - u.cool / 10; tool = 'pick'; zIn = 0.3; aL = aR = c < 0.35 ? -0.8 - c / 0.35 * 1.8 : -2.6 + (c - 0.35) / 0.65 * 1.9; eL = eR = -0.4; lean = c < 0.35 ? -0.1 : 0.35;
+      }
+      const ease = (grp: THREE.Group, axis: 'x' | 'y' | 'z', to: number) => { grp.rotation[axis] += (to - grp.rotation[axis]) * k; };
+      ease(P.legL, 'x', lL); ease(P.legR, 'x', lR); ease(P.kneeL, 'x', kL); ease(P.kneeR, 'x', kR);
+      ease(P.armL, 'x', aL); ease(P.armR, 'x', aR); ease(P.elbowL, 'x', eL); ease(P.elbowR, 'x', eR);
+      ease(P.armL, 'z', zIn); ease(P.armR, 'z', -zIn); ease(P.torso, 'x', lean); ease(P.torso, 'y', twist);
+      const hipY = HIP_Y - drop; P.legL.position.y += (hipY - P.legL.position.y) * k; P.legR.position.y = P.legL.position.y; P.torso.position.y = P.legL.position.y + bob;
+      for (const name of Object.keys(P.tools) as (keyof MinerParts['tools'])[]) P.tools[name].visible = name === tool || (name === 'sack' && u.loot > 0);
+      v.ring.visible = foe || ses.selUnits.has(u.id);
+
+      // label: progress bar, status mark, and health once it matters
+      const p = this.screenOf(g.position.x, g.position.y + (driving ? 1.25 : 1.12), g.position.z), L = v.label;
+      const idle = u.role === 'hand' && !working && !u.moving && u.queue.length === 0;
+      const hurt = u.hp < u.maxHp || foe || (ses.selUnits.has(u.id) && raidOn);
+      if (p.behind || (!working && !idle && !hurt)) L.style.display = 'none';
       else {
         L.style.display = 'block'; L.style.left = p.x + 'px'; L.style.top = p.y + 'px';
-        (L.firstChild as HTMLElement).textContent = idle ? (u.job ? '…' : '?') : '';
-        (L.firstChild as HTMLElement).style.color = u.job ? '#fff' : '#ffd95a';
-        const bar = L.lastChild as HTMLElement; bar.style.display = working ? 'block' : 'none';
+        const mark = L.children[0] as HTMLElement, bar = L.children[1] as HTMLElement, hb = L.children[2] as HTMLElement;
+        mark.textContent = idle ? (u.job ? '…' : '?') : '';
+        mark.style.color = u.job ? '#fff' : '#ffd95a';
+        bar.style.display = working ? 'block' : 'none';
         if (working) (bar.firstChild as HTMLElement).style.width = (100 * (1 - u.workLeft / u.workTotal)).toFixed(0) + '%';
+        hb.style.display = hurt ? 'block' : 'none';
+        if (hurt) { const f = Math.max(0, u.hp / u.maxHp), i = hb.firstChild as HTMLElement; i.style.width = (100 * f).toFixed(0) + '%'; i.style.background = foe ? '#ff5a4a' : f > 0.5 ? '#7ddc6a' : f > 0.25 ? '#f2c14e' : '#ff5a4a'; }
       }
     }
     for (const [id, v] of this.units) if (!s.units.some(u => u.id === id)) { this.world.remove(v.m.group); this.world.remove(v.ring); v.label.remove(); this.units.delete(id); ses.selUnits.delete(id); }
@@ -621,6 +800,7 @@ export class View3D {
   syncItems() {
     const ses = this.ses, s = ses.state;
     this.itemRing.visible = false;
+    const fences = new Set<number>(); for (const it of s.items) if (isFence(it.kind)) fences.add(it.y * s.size + it.x);
     for (const it of s.items) {
       let g = this.items.get(it.id);
       if (!g) {
@@ -633,8 +813,8 @@ export class View3D {
       if (isVehicle(it.kind)) {
         const du = unitById(s, it.driver), t = this.uTime.value;
         if (drv) { g.position.copy(drv.m.group.position); g.userData.yaw = drv.yaw; }
-        else { const x = it.x + 0.5, z = it.y + 0.5; g.position.set(x, this.itemGround(x, z), z); }
-        g.rotation.set(0, g.userData.yaw ?? 0.6, 0);
+        else { const [x, z] = centerOf(it); g.position.set(x, this.itemGround(x, z), z); }
+        g.rotation.set(0, g.userData.yaw ?? (footprint(it.kind)[0] > 1 ? Math.PI / 2 : 0.6), 0);
         const working = !!du && du.workTotal > 0;
         if (isDigger(it.kind)) {
           const boom = g.getObjectByName('boom')!, stick = g.getObjectByName('stick')!;
@@ -650,13 +830,21 @@ export class View3D {
         if (it.kind === 'barrow') { g.position.set(c.position.x + fx * 0.5, c.position.y, c.position.z + fz * 0.5); g.rotation.set(-0.12, carrier.yaw, 0); }
         else if (it.kind === 'atv') { g.position.copy(c.position); g.rotation.set(0, carrier.yaw, 0); c.position.y += 0.16; }   // the hand rides it
         else if (isFixture(it.kind)) { g.position.set(c.position.x, c.position.y + 1.05, c.position.z); g.rotation.set(0, carrier.yaw, 0); }
-        else { g.position.set(c.position.x + fx * 0.24, c.position.y + 0.33 + carrier.m.torso.position.y - 0.3, c.position.z + fz * 0.24); g.rotation.set(0, carrier.yaw, 0); }
+        else {
+          // While they dig, the bucket waits on the ground at their side.
+          const cu = unitById(s, it.carriedBy), digging = !!cu && cu.workTotal > 0 && (cu.queue[0]?.t === 'dig' || cu.queue[0]?.t === 'testpan');
+          if (digging) { const bx = c.position.x - fz * 0.38 + fx * 0.1, bz = c.position.z + fx * 0.38 + fz * 0.1; g.position.set(bx, this.itemGround(bx, bz), bz); }
+          else g.position.set(c.position.x + fx * 0.24, c.position.y + 0.33 + carrier.m.torso.position.y - HIP_Y, c.position.z + fz * 0.24);
+          g.rotation.set(0, carrier.yaw, 0);
+        }
       } else if (st) {
         const side = st.inSlot === it.id ? -1 : 1, x = st.x + 0.5 + side * 0.4, z = st.y + 0.5 + 0.28;
         g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, 0, 0);
       } else {
-        const stn = isFixture(it.kind), x = it.x + 0.5 + (stn ? 0 : ((it.id * 37) % 5 - 2) * 0.13), z = it.y + 0.5 + (stn ? 0 : ((it.id * 53) % 5 - 2) * 0.13);
-        g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, stn ? 0 : it.id * 1.7, 0);
+        const stn = isFixture(it.kind), [cx, cz] = centerOf(it), x = cx + (stn ? 0 : ((it.id * 37) % 5 - 2) * 0.13), z = cz + (stn ? 0 : ((it.id * 53) % 5 - 2) * 0.13);
+        // A fence panel turns to line up with its neighbours.
+        const turn = isFence(it.kind) && !fences.has((it.y) * s.size + it.x - 1) && !fences.has(it.y * s.size + it.x + 1) && (fences.has((it.y - 1) * s.size + it.x) || fences.has((it.y + 1) * s.size + it.x));
+        g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, stn ? (turn ? Math.PI / 2 : 0) : it.id * 1.7, 0);
       }
       if (isProcessor(it.kind)) {
         const drum = g.getObjectByName('drum'), deck = g.getObjectByName('deck'), load = g.getObjectByName('load');
@@ -674,9 +862,18 @@ export class View3D {
         el.className = 'inote' + (isTank(it.kind) && !it.note && it.fuel > TANKS[it.kind].capacity * 0.15 ? ' ok' : ''); el.textContent = text;
         el.style.display = p.behind ? 'none' : 'block'; el.style.left = p.x + 'px'; el.style.top = p.y + 'px';
       } else if (el) { el.remove(); this.notes.delete(it.id); }
-      if (it.id === ses.selItem) { this.itemRing.visible = true; this.itemRing.position.set(g.position.x, g.position.y + 0.04, g.position.z); this.itemRing.scale.setScalar(isFixture(it.kind) ? 1.6 : 0.75); }
+      // health bar once raiders have been at it, and smoke from a wreck
+      let hb = this.itemHp.get(it.id);
+      if (it.maxHp > 0 && it.hp < it.maxHp && onGround(it)) {
+        if (!hb) { hb = document.createElement('div'); hb.className = 'ulabel'; hb.innerHTML = '<div class="hbar wide"><i></i></div>'; this.labels.appendChild(hb); this.itemHp.set(it.id, hb); }
+        const p = this.screenOf(g.position.x, g.position.y + 0.25, g.position.z), f = it.hp / it.maxHp, i = hb.firstChild!.firstChild as HTMLElement;
+        hb.style.display = p.behind ? 'none' : 'block'; hb.style.left = p.x + 'px'; hb.style.top = p.y + 'px';
+        i.style.width = (100 * f).toFixed(0) + '%'; i.style.background = f > 0.5 ? '#7ddc6a' : f > 0.25 ? '#f2c14e' : '#ff5a4a';
+        if (it.hp <= 0 && Math.random() < 0.06) this.burst(g.position.x, g.position.y + 0.6, g.position.z, 2, 0x3a3a3a, 0.3, 1.6);
+      } else if (hb) { hb.remove(); this.itemHp.delete(it.id); }
+      if (it.id === ses.selItem) { this.itemRing.visible = true; this.itemRing.position.set(g.position.x, g.position.y + 0.04, g.position.z); this.itemRing.scale.setScalar(isFixture(it.kind) ? 1.25 * Math.max(...footprint(it.kind)) + 0.35 : 0.75); }
     }
-    for (const [id, g] of this.items) if (!s.items.some(i => i.id === id)) { this.world.remove(g); this.items.delete(id); this.itemGlows.delete(id); this.notes.get(id)?.remove(); this.notes.delete(id); if (ses.selItem === id) ses.selItem = -1; }
+    for (const [id, g] of this.items) if (!s.items.some(i => i.id === id)) { this.world.remove(g); this.items.delete(id); this.itemGlows.delete(id); this.notes.get(id)?.remove(); this.notes.delete(id); this.itemHp.get(id)?.remove(); this.itemHp.delete(id); if (ses.selItem === id) ses.selItem = -1; }
   }
 
   /** Hoses from each running pump to the pans and sluices it waters. */
@@ -749,6 +946,7 @@ export class View3D {
       if (P.life[i] <= 0) P.pos[i * 3 + 1] = -999; else if (P.life[i] < 0.3) { for (let k = 0; k < 3; k++) P.col[i * 3 + k] *= 0.9; }
     }
     P.pts.geometry.attributes.position.needsUpdate = true; P.pts.geometry.attributes.color.needsUpdate = true;
+    this.tracers = this.tracers.filter(tr => { const a = (now - tr.born) / 140; if (a >= 1) { this.world.remove(tr.l); tr.l.geometry.dispose(); return false; } (tr.l.material as THREE.LineBasicMaterial).opacity = 0.9 * (1 - a); return true; });
     this.pings = this.pings.filter(p => { const a = (now - p.born) / 450; if (a >= 1) { this.world.remove(p.m); p.m.geometry.dispose(); return false; } p.m.scale.setScalar(1 + a * 1.6); (p.m.material as THREE.MeshBasicMaterial).opacity = 1 - a; return true; });
     this.floats = this.floats.filter(f => { const a = (now - f.born) / 1500; if (a >= 1) { f.el.remove(); return false; } const p = this.screenOf(f.p.x, f.p.y + a * 0.9, f.p.z); f.el.style.left = p.x + 'px'; f.el.style.top = p.y + 'px'; f.el.style.opacity = String(a < 0.6 ? 1 : 1 - (a - 0.6) / 0.4); return true; });
     for (const f of this.flags.values()) { const born = f.g.userData.born as number; const a = born ? Math.min(1, (now - born) / 350) : 1; f.g.scale.setScalar(a < 1 ? 1.6 - 0.6 * a : 1); const pn = f.g.getObjectByName('pennant'); if (pn) pn.rotation.y = Math.sin(this.uTime.value * 3 + f.g.position.x) * 0.35; }

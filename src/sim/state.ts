@@ -1,4 +1,4 @@
-import { DIGGERS, LAYER_KEYS, TANKS, VEHICLES } from '../data/balance';
+import { DIGGERS, LAYER_KEYS, RAIDER, TANKS, VEHICLES, footprint } from '../data/balance';
 import type { ItemKind } from '../data/balance';
 
 export interface Tile {
@@ -47,6 +47,7 @@ export interface Item {
   timer: number;                 // ticks until the machine finishes its current load
   running: boolean;
   note: string;                  // why a machine is stopped, for the HUD
+  hp: number; maxHp: number;     // 0 max means raiders cannot damage it; hp 0 means wrecked
 }
 
 export type Order =
@@ -86,7 +87,17 @@ export interface Unit {
   status: string;                // short text for the HUD
   moving: boolean;
   facing: number;                // -1 left, 1 right (screen space)
+  role: Role;
+  hp: number; maxHp: number;
+  cool: number;                  // ticks until the next attack
+  hurt: number;                  // tick this unit last took damage
+  target: number;                // id of the unit or item being attacked, or -1
+  loot: number;                  // cash a thief is carrying
+  post: { x: number; y: number } | null; // where a guard stands watch
+  nav: { goal: number; path: number[]; at: number } | null; // A* route in progress
 }
+
+export type Role = 'boss' | 'hand' | 'guard' | 'bandit' | 'thief';
 
 export interface Player {
   id: number;
@@ -102,8 +113,9 @@ export interface Player {
 }
 
 export interface GameEvent {
-  type: 'gold' | 'sample' | 'claim' | 'toast' | 'dug' | 'buy' | 'hire' | 'dig' | 'sieve' | 'scoop' | 'dump' | 'refuel' | 'rip' | 'drill';
+  type: 'gold' | 'sample' | 'claim' | 'toast' | 'dug' | 'buy' | 'hire' | 'dig' | 'sieve' | 'scoop' | 'dump' | 'refuel' | 'rip' | 'drill' | 'raid' | 'shot' | 'hit' | 'death' | 'wreck' | 'steal';
   x?: number; y?: number;
+  x2?: number; y2?: number;
   amount?: number;
   text?: string;
   owner?: number;
@@ -119,7 +131,8 @@ export interface GameState {
   items: Item[];
   players: Player[];
   nextId: number;
-  over: '' | 'broke' | 'season';
+  over: '' | 'broke' | 'season' | 'dead';
+  raid: { next: number; spawnAt: number; wave: number; fromX: number; fromY: number };
   events: GameEvent[];           // cleared by the view after each frame
   spawn: { x: number; y: number };
 }
@@ -135,7 +148,14 @@ export const isVehicle = (k: ItemKind) => k in VEHICLES;
 export const isDigger = (k: ItemKind) => k in DIGGERS;
 export const isTank = (k: ItemKind) => k in TANKS;
 export const isProcessor = (k: ItemKind) => k === 'trommel' || k === 'washplant' || k === 'crusher' || k === 'mill';
-export const isFixture = (k: ItemKind) => isStation(k) || isProcessor(k) || isTank(k) || isVehicle(k) || k === 'pump';
+export const isFence = (k: ItemKind) => k === 'woodfence' || k === 'chainfence';
+export const isDefense = (k: ItemKind) => isFence(k) || k === 'tower' || k === 'armory';
+export const isFixture = (k: ItemKind) => isStation(k) || isProcessor(k) || isTank(k) || isVehicle(k) || k === 'pump' || isDefense(k);
+export const isRaider = (u: Unit) => u.owner === RAIDER;
+/** Tiles an item covers: [x0, y0, x1, y1], inclusive. */
+export function rectOf(i: { kind: ItemKind; x: number; y: number }): [number, number, number, number] { const [w, h] = footprint(i.kind); return [i.x, i.y, i.x + w - 1, i.y + h - 1]; }
+/** The middle of an item's footprint, in tile units. */
+export function centerOf(i: { kind: ItemKind; x: number; y: number }): [number, number] { const [w, h] = footprint(i.kind); return [i.x + w / 2, i.y + h / 2]; }
 
 /** Loads left in layer k of a tile (0 organic .. 4 bedrock). */
 export const layerLeft = (t: Tile, k: number): number => t[LAYER_KEYS[k]];

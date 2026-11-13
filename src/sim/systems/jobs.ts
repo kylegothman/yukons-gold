@@ -1,6 +1,6 @@
 import { DIGGERS, HOPPER, VEHICLES } from '../../data/balance';
 import { GameState, Item, Unit, isContainer, isDigger, isTank, isVehicle, isWash, itemById, onGround, tileAt, tileLevel, unitById } from '../state';
-import { canDigLayer, wet } from './machines';
+import { canDigLayer, wet, broken } from './machines';
 
 const d2 = (ax: number, ay: number, bx: number, by: number) => (ax - bx) ** 2 + (ay - by) ** 2;
 
@@ -57,10 +57,10 @@ function deliver(s: GameState, u: Unit, st: Item) {
  * trommel, since the plant is the faster line.
  */
 function processorFor(s: GameState, u: Unit, ore: boolean, load = 0): Item | undefined {
-  if (ore) return nearest(s, u, i => i.kind === 'crusher');
+  if (ore) return nearest(s, u, i => i.kind === 'crusher' && !broken(i));
   let best: Item | undefined, bs = Infinity;
   for (const i of s.items) {
-    if (i.owner !== u.owner || !onGround(i) || (i.kind !== 'trommel' && i.kind !== 'washplant')) continue;
+    if (i.owner !== u.owner || !onGround(i) || broken(i) || (i.kind !== 'trommel' && i.kind !== 'washplant')) continue;
     const score = Math.sqrt(d2(u.x, u.y, i.x + 0.5, i.y + 0.5)) + (HOPPER[i.kind] - i.hopper < load ? 1000 : 0) + (i.kind === 'trommel' ? 12 : 0);
     if (score < bs) { bs = score; best = i; }
   }

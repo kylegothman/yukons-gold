@@ -161,3 +161,40 @@ A bot that sends only player commands plays full seasons (`npm run balance`). Ac
 - Store orders arrive instantly on the tile you pick.
 - An organic layer holds 12 loads where a real 10 by 10 by 2 foot layer would hold about 300, so tiles dig out and claims matter.
 - Single player. The simulation is deterministic and command-driven so that multiplayer can be added in a separate version.
+
+
+## Raids, defenses and the ground gear covers (added after the first release)
+
+Late in a season the money piled up with nothing pushing back. Three changes fix that and tidy up how gear sits on the map.
+
+### One thing to a square
+
+Every piece of gear covers a footprint in tiles, sized roughly true to life at 10 ft a tile: a trommel is 2 x 1, a wash plant 3 x 2, a crusher or mill 2 x 2, a mining excavator 3 x 3. Nothing can be placed on a square that is already taken, and the placement preview shows each square green or red before the click. People walk around gear with A* pathfinding over the tile grid (`src/sim/systems/nav.ts`). A hand heading for a machine stops beside it.
+
+### Raids
+
+The first raid comes on day 9, then every 4 to 6 days. Raid size grows with the season and, more steeply, with how much gold has been sold, so a camp that is scraping by sees a sneak thief or two and a rich one sees a war party (capped at 12).
+
+- Thieves walk to camp, take 5% of the cash and run for the map edge. Stop one and the cash comes back.
+- Bandits only show up once $10,000 of gold has been sold. They attack anyone within reach, then wreck the nearest machine.
+- A wrecked machine stops until it is repaired for up to 25% of its price. Fences, towers and the armory are flattened for good.
+- Everyone has health. Out of a fight it comes back slowly. If Yukon falls the season ends.
+- Nobody bleeds: whoever goes down goes up in a gold firework.
+
+### Defenses
+
+| Item | Price | Upkeep per day | What it does |
+|---|---|---|---|
+| Wood fence | $40 a tile | | Blocks raiders until broken. The crew walks through |
+| Chain link fence | $120 a tile | | Nearly three times as tough |
+| Guard | $300 | $60 | Fights raiders within sight; goes where sent |
+| Guard tower | $2,500 | $40 | Fires on raiders within 8 tiles |
+| Armory | $6,000 | $60 | Guards and towers hit 50% harder |
+
+### Balance check
+
+The bot now buys guards and towers as its income grows. Over 20 seasons on the 128 map it lost 4 (Yukon killed or the camp bankrupted), against none with raids switched off (`RAIDS=0 npm run balance`). Raid numbers are in `RAID`, `UNIT_STATS`, `TOWER` and `THIEF` in `src/data/balance.ts`.
+
+### Controls
+
+Selection follows StarCraft: a click selects one person or one piece of gear, a drag boxes a crew, a double click takes everyone of that kind on screen, Ctrl+number saves a group and the number recalls it. A crew bar along the bottom has a face for everyone on the payroll. An unmanned machine has a "Send a driver" button.

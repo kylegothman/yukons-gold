@@ -91,6 +91,16 @@ export class Sfx {
       case 'claim': [523, 659, 784, 1047].forEach((f, i) => this.tone(f, 0.35, 0.16, 'triangle', i * 0.09)); this.hiss(200, 1, 0.12, 0.4, 'lowpass'); break;
       case 'buy': this.tone(880, 0.09, 0.12, 'square'); this.tone(1320, 0.3, 0.12, 'sine', 0.07); break;
       case 'hire': this.tone(392, 0.12, 0.14, 'triangle'); this.tone(523, 0.25, 0.14, 'triangle', 0.1); break;
+      case 'raid': [0, 0.28, 0.56].forEach(w => { this.tone(520, 0.24, 0.2, 'sawtooth', w, 760); }); break;
+      case 'shot': if (this.ok(name, 60)) { this.hiss(1800, 0.6, 0.09, 0.5 * v, 'highpass'); this.tone(170, 0.1, 0.25 * v, 'square', 0, 70); } break;
+      case 'hit': if (this.ok(name, 90)) this.hiss(700, 1.2, 0.07, 0.3 * v, 'bandpass'); break;
+      case 'wreck': if (this.ok(name, 200)) { this.hiss(180, 0.6, 0.6, 0.7 * v, 'lowpass', 0, 60); this.tone(70, 0.5, 0.3 * v, 'square', 0, 40); } break;
+      case 'steal': this.tone(330, 0.12, 0.16, 'square'); this.tone(247, 0.25, 0.16, 'square', 0.12); break;
+      case 'death': if (this.ok(name, 80)) {   // a firework: whistle up, crackle out
+        this.tone(500, 0.22, 0.12 * v, 'sine', 0, 1700); this.hiss(300, 0.5, 0.5, 0.6 * v, 'lowpass', 0.2, 80);
+        for (let i = 0; i < 7; i++) this.hiss(4200 + i * 300, 3, 0.05, 0.2 * v, 'bandpass', 0.24 + i * 0.06);
+        [1568, 2093, 2637].forEach((f, i) => this.tone(f, 0.5, 0.07 * v, 'sine', 0.22 + i * 0.05));
+      } break;
       case 'click': if (this.ok(name, 40)) this.tone(660, 0.05, 0.07, 'square'); break;
       case 'error': if (this.ok(name, 200)) this.tone(160, 0.18, 0.12, 'square', 0, 110); break;
     }

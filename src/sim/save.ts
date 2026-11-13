@@ -7,7 +7,7 @@ import type { GameState, Tile } from './state';
 
 const FIELDS = ['organicLeft', 'topsoilLeft', 'brownLeft', 'blueLeft', 'bedrockLeft', 'sample', 'owner'] as const;
 
-export interface SaveData { v: 3; seed: number; size: number; core: Omit<GameState, 'tiles' | 'events'>; tiles: number[] }
+export interface SaveData { v: 4; seed: number; size: number; core: Omit<GameState, 'tiles' | 'events'>; tiles: number[] }
 
 export function serialize(s: GameState): SaveData {
   const fresh = createGame(s.seed, s.size).tiles, tiles: number[] = [];
@@ -17,7 +17,7 @@ export function serialize(s: GameState): SaveData {
     tiles.push(i, ...FIELDS.map(k => t[k]), (t.known ? 1 : 0) | (t.ripped ? 2 : 0) | (t.drilled ? 4 : 0));
   });
   const { tiles: _t, events: _e, ...core } = s;
-  return { v: 3, seed: s.seed, size: s.size, core: JSON.parse(JSON.stringify(core)), tiles };
+  return { v: 4, seed: s.seed, size: s.size, core: JSON.parse(JSON.stringify(core)), tiles };
 }
 
 export function deserialize(d: SaveData): GameState {

@@ -1,6 +1,6 @@
-import { LAYERS, LAYER_LOADS, MAP_SIZE, START_CASH, TANKS, VEHICLES } from '../data/balance';
+import { ITEM_HP, LAYERS, LAYER_LOADS, MAP_SIZE, RAID, START_CASH, TANKS, TICKS_PER_DAY, UNIT_STATS, VEHICLES } from '../data/balance';
 import { fbm, hash2 } from './rng';
-import type { GameState, Item, Tile, Unit } from './state';
+import type { GameState, Item, Role, Tile, Unit } from './state';
 import type { ItemKind } from '../data/balance';
 
 export function organicGrade(t: Tile): number { return t.richness * LAYERS[0].mult; }
@@ -14,6 +14,7 @@ export function newItem(s: GameState, kind: ItemKind, owner: number, x: number, 
     contents: 'empty', loads: 0, gold: 0, reservedBy: -1, inSlot: -1, outSlot: -1, operator: -1,
     fuel: TANKS[kind]?.capacity ?? VEHICLES[kind]?.tank ?? 0, ore: false, cargo: 0,
     hopper: 0, hopperGold: 0, feed: 0, feedGold: 0, driver: -1, timer: 0, running: false, note: '',
+    hp: ITEM_HP[kind] ?? 0, maxHp: ITEM_HP[kind] ?? 0,
   };
   s.items.push(it);
   return it;
@@ -21,12 +22,13 @@ export function newItem(s: GameState, kind: ItemKind, owner: number, x: number, 
 
 const NAMES = ['Hank', 'Dusty', 'Mabel', 'Jed', 'Rosa', 'Cyrus', 'Opal', 'Buck', 'Ines', 'Walt', 'June', 'Otis', 'Pearl', 'Gus', 'Nell', 'Amos'];
 
-export function newUnit(s: GameState, owner: number, x: number, y: number, boss: boolean): Unit {
-  const id = s.nextId++;
+export function newUnit(s: GameState, owner: number, x: number, y: number, boss: boolean, role: Role = boss ? 'boss' : 'hand'): Unit {
+  const id = s.nextId++, hp = UNIT_STATS[role].hp;
   const u: Unit = {
-    id, owner, boss, name: boss ? 'You' : NAMES[(id * 7 + s.seed) % NAMES.length],
+    id, owner, boss, name: boss ? 'Yukon' : role === 'bandit' ? 'Bandit' : role === 'thief' ? 'Thief' : NAMES[(id * 7 + s.seed) % NAMES.length],
     x, y, carrying: -1, vehicle: -1, queue: [], job: null, workLeft: 0, workTotal: 0, blocked: 0,
     status: 'Idle', moving: false, facing: 1,
+    role, hp, maxHp: hp, cool: 0, hurt: -9999, target: -1, loot: 0, post: null, nav: null,
   };
   s.units.push(u);
   return u;
@@ -64,6 +66,7 @@ export function createGame(seed: number, size = MAP_SIZE): GameState {
     seed, rng: seed | 0, tick: 0, size, tiles, units: [], items: [],
     players: [{ id: 0, cash: START_CASH, goldGrams: 0, earned: 0, claims: 0, tilesDug: 0, loadsWashed: 0, samples: 0, tier: 1, drill: false }],
     nextId: 1, over: '', events: [], spawn: { x: 0, y: 0 },
+    raid: { next: RAID.firstDay * TICKS_PER_DAY, spawnAt: -1, wave: 0, fromX: 0, fromY: 0 },
   };
   // Camp goes on the creek bank. Of the spots along the middle half of the creek,
   // pick the one with the most paying ground within a short walk, so no season

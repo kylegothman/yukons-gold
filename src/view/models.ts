@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { VEHICLES, footprint } from '../data/balance';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 
 // Every model is built from primitives in code; there are no asset files.
@@ -59,41 +60,102 @@ export function flowerGeometry(): THREE.BufferGeometry {
   ])!;
 }
 
-export interface MinerParts { group: THREE.Group; legL: THREE.Group; legR: THREE.Group; armL: THREE.Group; armR: THREE.Group; torso: THREE.Group }
+export interface MinerParts {
+  group: THREE.Group; torso: THREE.Group; head: THREE.Group;
+  legL: THREE.Group; legR: THREE.Group; kneeL: THREE.Group; kneeR: THREE.Group;
+  armL: THREE.Group; armR: THREE.Group; elbowL: THREE.Group; elbowR: THREE.Group;
+  tools: Record<'pick' | 'shovel' | 'pan' | 'rifle' | 'club' | 'sack', THREE.Object3D>;
+}
+export type Look = 'boss' | 0 | 1 | 2 | 'guard' | 'bandit' | 'thief';
+/** Height of the hip joint; the torso group sits here when standing still. */
+export const HIP_Y = 0.5;
 
-const LOOKS = {
-  boss: { shirt: 0xc8452f, pants: 0x35507a, hat: 0xd9b36a },
-  0: { shirt: 0x6f8f4e, pants: 0x4a4036, hat: 0x8a8f96 },
-  1: { shirt: 0xd9a441, pants: 0x3e4a5c, hat: 0x7a5236 },
-  2: { shirt: 0x5b86b8, pants: 0x4a4036, hat: 0xb9b09a },
-} as const;
+const LOOKS: Record<string, { shirt: number; pants: number; hat: number; skin: number; hair: number }> = {
+  boss: { shirt: 0xb8402c, pants: 0x3b4f6e, hat: 0xb99257, skin: 0xe0ac86, hair: 0x7a5a3a },
+  0: { shirt: 0x5f7d48, pants: 0x4a4036, hat: 0xf2c230, skin: 0xd9a47c, hair: 0x2c2018 },
+  1: { shirt: 0xc98f3a, pants: 0x3e4a5c, hat: 0xf4f1e6, skin: 0xa8734f, hair: 0x1b1410 },
+  2: { shirt: 0x4f79a8, pants: 0x4a4036, hat: 0xe8742c, skin: 0xecc09c, hair: 0x8a6a3c },
+  guard: { shirt: 0x3f74b8, pants: 0x2b3a55, hat: 0x2b3a55, skin: 0xd9a47c, hair: 0x2c2018 },
+  bandit: { shirt: 0x2a2523, pants: 0x1c1a19, hat: 0x141210, skin: 0xcf9f7c, hair: 0x1b1410 },
+  thief: { shirt: 0x55524e, pants: 0x34322f, hat: 0x3f3d3a, skin: 0xcf9f7c, hair: 0x1b1410 },
+};
 
-export function makeMiner(variant: 'boss' | 0 | 1 | 2): MinerParts {
+// A jointed figure about one tile tall: hips, knees, shoulders and elbows all bend,
+// and the tools of the trade ride in the right hand, shown one at a time.
+export function makeMiner(variant: Look): MinerParts {
   const L = LOOKS[variant], group = new THREE.Group();
-  const skin = mat(0xe8b98d), boots = mat(0x3a2a1c);
-  const limb = (color: number, len: number, w: number, end: THREE.Material, x: number, y: number) => {
-    const pivot = new THREE.Group(); pivot.position.set(x, y, 0);
-    pivot.add(mesh(new THREE.CapsuleGeometry(w, len - w * 2, 3, 8), mat(color), 0, -len / 2, 0));
-    pivot.add(mesh(new THREE.SphereGeometry(w * 1.15, 8, 6), end, 0, -len, 0));
-    return pivot;
+  const skin = mat(L.skin), boots = mat(0x2e2219), shirt = mat(L.shirt), pants = mat(L.pants), steel = mat(0x8d949c, { metalness: 0.7, roughness: 0.4 }), wood = mat(0x8a6238);
+  const seg = (m: THREE.Material, len: number, r0: number, r1: number) => mesh(new THREE.CylinderGeometry(r0, r1, len, 10), m, 0, -len / 2, 0);
+  const joint = (m: THREE.Material, r: number, y = 0) => mesh(new THREE.SphereGeometry(r, 10, 8), m, 0, y, 0);
+  const leg = (x: number) => {
+    const hip = new THREE.Group(); hip.position.set(x, HIP_Y, 0);
+    hip.add(joint(pants, 0.062), seg(pants, 0.24, 0.06, 0.048));
+    const knee = new THREE.Group(); knee.position.y = -0.24;
+    knee.add(joint(pants, 0.048), seg(pants, 0.2, 0.046, 0.038));
+    knee.add(mesh(new THREE.BoxGeometry(0.075, 0.07, 0.15), boots, 0, -0.225, 0.03));
+    hip.add(knee);
+    return [hip, knee] as const;
   };
-  const legL = limb(L.pants, 0.3, 0.055, boots, -0.07, 0.32), legR = limb(L.pants, 0.3, 0.055, boots, 0.07, 0.32);
-  const torso = new THREE.Group(); torso.position.y = 0.3;
-  torso.add(mesh(new THREE.CapsuleGeometry(0.125, 0.14, 4, 12), mat(L.shirt), 0, 0.18, 0));
-  torso.add(mesh(new THREE.CylinderGeometry(0.13, 0.125, 0.12, 12), mat(L.pants), 0, 0.07, 0)); // overalls
-  torso.add(mesh(new THREE.BoxGeometry(0.035, 0.2, 0.26), mat(L.pants), -0.06, 0.2, 0)); torso.add(mesh(new THREE.BoxGeometry(0.035, 0.2, 0.26), mat(L.pants), 0.06, 0.2, 0));
-  const armL = limb(L.shirt, 0.25, 0.045, skin, -0.17, 0.3), armR = limb(L.shirt, 0.25, 0.045, skin, 0.17, 0.3);
+  const [legL, kneeL] = leg(-0.065), [legR, kneeR] = leg(0.065);
+  const torso = new THREE.Group(); torso.position.y = HIP_Y;
+  // pelvis, waist and chest: wider at the shoulders than at the belt
+  torso.add(mesh(new THREE.CylinderGeometry(0.105, 0.115, 0.1, 12), pants, 0, 0.03, 0));
+  torso.add(mesh(new THREE.CylinderGeometry(0.135, 0.105, 0.22, 12), shirt, 0, 0.19, 0).translateZ(0.005));
+  torso.add(mesh(new THREE.SphereGeometry(0.135, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), shirt, 0, 0.3, 0.005));
+  torso.children.forEach(c => { c.scale.z = 0.72; });
+  torso.add(mesh(new THREE.BoxGeometry(0.2, 0.025, 0.16), mat(0x2e2219), 0, 0.085, 0));                       // belt
+  if (variant === 'boss') for (const x of [-0.06, 0.06]) torso.add(mesh(new THREE.BoxGeometry(0.03, 0.26, 0.2), pants, x, 0.22, 0)); // suspenders
+  if (variant === 0 || variant === 1 || variant === 2) torso.add(mesh(new THREE.BoxGeometry(0.265, 0.035, 0.215), mat(0xe6e84a, { emissive: 0x33340a }), 0, 0.2, 0)); // hi-vis band
+  if (variant === 'guard') torso.add(mesh(new THREE.BoxGeometry(0.04, 0.04, 0.01), mat(0xf2c14e, { metalness: 0.8, roughness: 0.3 }), -0.06, 0.26, 0.1));
+  const arm = (x: number) => {
+    const sh = new THREE.Group(); sh.position.set(x, 0.3, 0);
+    sh.add(joint(shirt, 0.055), seg(shirt, 0.19, 0.048, 0.04));
+    const el = new THREE.Group(); el.position.y = -0.19;
+    el.add(joint(shirt, 0.04), seg(variant === 'boss' ? skin : shirt, 0.17, 0.038, 0.032), joint(skin, 0.04, -0.19));
+    sh.add(el);
+    return [sh, el] as const;
+  };
+  const [armL, elbowL] = arm(-0.175), [armR, elbowR] = arm(0.175);
   torso.add(armL, armR);
-  const head = mesh(new THREE.SphereGeometry(0.115, 14, 12), skin, 0, 0.46, 0);
-  head.add(mesh(new THREE.SphereGeometry(0.075, 10, 8), mat(0x6b4a2b), 0, -0.06, 0.055)); // beard
-  head.add(mesh(new THREE.SphereGeometry(0.016, 6, 6), mat(0x1b1208), -0.04, 0.02, 0.105)); head.add(mesh(new THREE.SphereGeometry(0.016, 6, 6), mat(0x1b1208), 0.04, 0.02, 0.105));
-  head.add(mesh(new THREE.CylinderGeometry(0.2, 0.21, 0.02, 16), mat(L.hat), 0, 0.075, 0));
-  head.add(mesh(new THREE.CylinderGeometry(0.095, 0.115, 0.11, 14), mat(L.hat), 0, 0.135, 0));
-  head.add(mesh(new THREE.CylinderGeometry(0.117, 0.117, 0.025, 14), mat(0x3a2a1c), 0, 0.095, 0));
+  const head = new THREE.Group(); head.position.y = 0.44;
+  head.add(mesh(new THREE.CylinderGeometry(0.04, 0.045, 0.06, 8), skin, 0, -0.085, 0));                        // neck
+  const skull = mesh(new THREE.SphereGeometry(0.085, 16, 12), skin, 0, 0, 0); skull.scale.set(0.92, 1.1, 1); head.add(skull);
+  head.add(mesh(new THREE.ConeGeometry(0.016, 0.04, 6), skin, 0, -0.01, 0.088).rotateX(Math.PI / 2));          // nose
+  for (const x of [-0.032, 0.032]) { head.add(mesh(new THREE.SphereGeometry(0.011, 6, 6), mat(0x1b1208), x, 0.012, 0.076)); head.add(mesh(new THREE.BoxGeometry(0.03, 0.008, 0.01), mat(L.hair), x, 0.034, 0.078)); }
+  for (const x of [-0.08, 0.08]) head.add(mesh(new THREE.SphereGeometry(0.018, 6, 6), skin, x, -0.005, 0));     // ears
+  head.add(mesh(new THREE.SphereGeometry(0.088, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.55), mat(L.hair), 0, 0.006, -0.012)); // hair
+  if (variant === 'boss') {
+    const beard = mesh(new THREE.SphereGeometry(0.07, 10, 8), mat(L.hair), 0, -0.055, 0.035); beard.scale.set(1, 1.05, 0.8); head.add(beard);
+    head.add(mesh(new THREE.CylinderGeometry(0.17, 0.18, 0.014, 18), mat(L.hat), 0, 0.068, 0), mesh(new THREE.CylinderGeometry(0.075, 0.092, 0.09, 14), mat(L.hat), 0, 0.118, 0), mesh(new THREE.CylinderGeometry(0.094, 0.094, 0.02, 14), mat(0x3a2a1c), 0, 0.085, 0));
+  } else if (variant === 'guard') {
+    head.add(mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.05, 14), mat(L.hat), 0, 0.085, 0), mesh(new THREE.BoxGeometry(0.13, 0.012, 0.09), mat(L.hat), 0, 0.064, 0.085));
+  } else if (variant === 'bandit') {
+    head.add(mesh(new THREE.CylinderGeometry(0.155, 0.165, 0.014, 18), mat(L.hat), 0, 0.068, 0), mesh(new THREE.CylinderGeometry(0.08, 0.09, 0.085, 14), mat(L.hat), 0, 0.115, 0));
+    const mask = mesh(new THREE.SphereGeometry(0.09, 12, 8, 0, Math.PI * 2, Math.PI * 0.52, Math.PI * 0.4), mat(0xa32a22), 0, 0, 0.004); mask.scale.set(0.95, 1.1, 1.02); head.add(mask);
+  } else if (variant === 'thief') {
+    const hood = mesh(new THREE.SphereGeometry(0.1, 12, 10, 0, Math.PI * 2, 0, Math.PI * 0.62), mat(L.hat), 0, 0.004, -0.012); hood.scale.set(1, 1.12, 1.08); head.add(hood);
+    const mask = mesh(new THREE.SphereGeometry(0.09, 12, 8, 0, Math.PI * 2, Math.PI * 0.52, Math.PI * 0.4), mat(0x22201e), 0, 0, 0.004); mask.scale.set(0.95, 1.1, 1.02); head.add(mask);
+  } else {
+    // hard hat with a brim
+    head.add(mesh(new THREE.SphereGeometry(0.098, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2), mat(L.hat, { roughness: 0.45 }), 0, 0.04, 0), mesh(new THREE.CylinderGeometry(0.115, 0.115, 0.012, 16), mat(L.hat, { roughness: 0.45 }), 0, 0.042, 0.012));
+  }
   torso.add(head);
+  // Tools hang from the right hand, pointing on past it, so swinging the arm swings the tool.
+  const hand = new THREE.Group(); hand.position.y = -0.19; elbowR.add(hand);
+  const pick = new THREE.Group(); pick.add(mesh(new THREE.CylinderGeometry(0.014, 0.016, 0.5, 6), wood, 0, -0.2, 0));
+  const pickHead = mesh(new THREE.TorusGeometry(0.19, 0.016, 6, 12, Math.PI * 0.55), steel, 0, -0.615, 0); pickHead.rotation.set(0, Math.PI / 2, Math.PI * 0.225); pick.add(pickHead);
+  const shovel = new THREE.Group(); shovel.add(mesh(new THREE.CylinderGeometry(0.013, 0.013, 0.5, 6), wood, 0, -0.2, 0));
+  const blade = mesh(new THREE.BoxGeometry(0.11, 0.15, 0.012), steel, 0, -0.52, 0.01); blade.rotation.x = -0.15; shovel.add(blade);
+  const rifle = new THREE.Group(); rifle.add(mesh(new THREE.BoxGeometry(0.03, 0.2, 0.05), wood, 0, 0.04, 0), mesh(new THREE.CylinderGeometry(0.011, 0.011, 0.36, 6), mat(0x2b2d31, { metalness: 0.8, roughness: 0.35 }), 0, -0.22, 0.008));
+  const club = new THREE.Group(); club.add(mesh(new THREE.CylinderGeometry(0.03, 0.016, 0.36, 8), mat(0x5a4028), 0, -0.14, 0));
+  hand.add(pick, shovel, rifle, club);
+  const pan = new THREE.Group(); pan.add(mesh(new THREE.CylinderGeometry(0.13, 0.085, 0.035, 16, 1, true), mat(0x3a3d42, { metalness: 0.7, roughness: 0.4, side: THREE.DoubleSide }), 0, 0, 0), mesh(new THREE.CircleGeometry(0.086, 14).rotateX(-Math.PI / 2), mat(0x6b4a2b), 0, -0.012, 0));
+  pan.position.set(0, 0.1, 0.3); torso.add(pan);
+  const sack = mesh(new THREE.SphereGeometry(0.12, 10, 8), mat(0x9a8458), 0, 0.2, -0.16); sack.scale.set(1, 1.25, 0.8); torso.add(sack);
+  const tools = { pick, shovel, pan, rifle, club, sack };
+  for (const t of Object.values(tools)) t.visible = false;
   group.add(legL, legR, torso);
-  group.scale.setScalar(1.3);
-  return { group, legL, legR, armL, armR, torso };
+  return { group, torso, head, legL, legR, kneeL, kneeR, armL, armR, elbowL, elbowR, tools };
 }
 
 const FILL = { paydirt: 0x6b4a2b, fines: 0xb39563 } as const;
@@ -317,16 +379,64 @@ function atv(): THREE.Group {
   const fill = mesh(new THREE.SphereGeometry(0.17, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2), M(FILL.paydirt, { roughness: 1 }), 0, 0.24, -0.44); fill.scale.set(0.95, 0.6, 0.95); fill.name = 'fill'; g.add(fill);
   return g;
 }
-const SCALE: Record<string, number> = { excavator2: 1.35, excavator3: 1.75, excavator4: 2.25, tank2: 1.5, tank3: 2.2 };
+function woodfence(): THREE.Group {
+  const g = new THREE.Group(), w = mat(0x9a7446);
+  for (const x of [-0.45, 0, 0.45]) g.add(mesh(new THREE.BoxGeometry(0.07, 0.62, 0.07), w, x, 0.31, 0));
+  for (const y of [0.2, 0.42]) g.add(mesh(new THREE.BoxGeometry(1.0, 0.07, 0.035), w, 0, y, 0.04));
+  for (let i = 0; i < 7; i++) g.add(mesh(new THREE.BoxGeometry(0.09, 0.6 + (i % 2) * 0.05, 0.02), mat(0xb08a58), -0.42 + i * 0.14, 0.33, 0.065));
+  return g;
+}
+function chainfence(): THREE.Group {
+  const g = new THREE.Group(), st = mat(0x9aa1a8, { metalness: 0.8, roughness: 0.4 });
+  for (const x of [-0.48, 0.48]) g.add(mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.9, 8), st, x, 0.45, 0));
+  for (const y of [0.06, 0.86]) { const r = mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.96, 6), st, 0, y, 0); r.rotation.z = Math.PI / 2; g.add(r); }
+  const c = document.createElement('canvas'); c.width = c.height = 64; const x = c.getContext('2d')!;
+  x.strokeStyle = '#c9d0d6'; x.lineWidth = 2.5; for (let i = -64; i < 128; i += 16) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i + 64, 64); x.stroke(); x.beginPath(); x.moveTo(i + 64, 0); x.lineTo(i, 64); x.stroke(); }
+  const tex = new THREE.CanvasTexture(c); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; tex.repeat.set(3, 2.6);
+  g.add(mesh(new THREE.PlaneGeometry(0.96, 0.8), new THREE.MeshStandardMaterial({ map: tex, transparent: true, alphaTest: 0.3, side: THREE.DoubleSide, metalness: 0.6, roughness: 0.5 }), 0, 0.46, 0));
+  for (let i = 0; i < 3; i++) { const b = mesh(new THREE.TorusGeometry(0.06, 0.008, 4, 10), st, -0.3 + i * 0.3, 0.93, 0); b.rotation.y = Math.PI / 2; g.add(b); }  // razor coil
+  return g;
+}
+function tower(): THREE.Group {
+  const g = new THREE.Group(), w = mat(0x8a6238), dark = mat(0x5a4028);
+  for (const [x, z] of [[-0.3, -0.3], [0.3, -0.3], [-0.3, 0.3], [0.3, 0.3]]) { const l = mesh(new THREE.BoxGeometry(0.07, 1.5, 0.07), w, x, 0.75, z); l.rotation.set(z > 0 ? -0.05 : 0.05, 0, x > 0 ? 0.05 : -0.05); g.add(l); }
+  for (const y of [0.45, 0.95]) for (const r of [0, Math.PI / 2]) { const b = mesh(new THREE.BoxGeometry(0.85, 0.045, 0.045), dark, 0, y, 0); b.rotation.set(0, r + Math.PI / 4, 0.5); g.add(b); }
+  g.add(mesh(new THREE.BoxGeometry(0.9, 0.06, 0.9), w, 0, 1.5, 0));
+  for (const [x, z, sx, sz] of [[0, 0.43, 0.9, 0.04], [0, -0.43, 0.9, 0.04], [0.43, 0, 0.04, 0.9], [-0.43, 0, 0.04, 0.9]]) g.add(mesh(new THREE.BoxGeometry(sx, 0.3, sz), dark, x, 1.68, z));
+  for (const [x, z] of [[-0.4, -0.4], [0.4, -0.4], [-0.4, 0.4], [0.4, 0.4]]) g.add(mesh(new THREE.BoxGeometry(0.05, 0.75, 0.05), w, x, 1.9, z));
+  const roof = mesh(new THREE.ConeGeometry(0.78, 0.36, 4), mat(0x6e2f24), 0, 2.45, 0); roof.rotation.y = Math.PI / 4; g.add(roof);
+  const lamp = mesh(new THREE.SphereGeometry(0.06, 8, 8), mat(0xfff2c2, { emissive: 0xffd27a, emissiveIntensity: 1.5 }), 0, 2.2, 0); g.add(lamp);
+  const watch = makeMiner('guard'); watch.group.scale.setScalar(0.8); watch.group.position.set(0, 1.53, 0); watch.tools.rifle.visible = true; watch.armR.rotation.x = -0.9; watch.elbowR.rotation.x = -0.9; g.add(watch.group);
+  return g;
+}
+function armory(): THREE.Group {
+  const g = new THREE.Group();
+  g.add(mesh(new THREE.BoxGeometry(1.7, 0.9, 1.5), mat(0x6f7480, { metalness: 0.5, roughness: 0.6 }), 0, 0.45, 0));
+  const roof = mesh(new THREE.CylinderGeometry(0.78, 0.78, 1.72, 14, 1, false, 0, Math.PI), mat(0x4c525c, { metalness: 0.6, roughness: 0.5 }), 0, 0.88, 0); roof.rotation.set(0, 0, Math.PI / 2); roof.rotation.y = Math.PI / 2; roof.scale.set(1, 1, 0.5); g.add(roof);
+  g.add(mesh(new THREE.BoxGeometry(0.5, 0.65, 0.04), mat(0x2b2d31), 0, 0.33, 0.76), mesh(new THREE.BoxGeometry(0.3, 0.2, 0.03), mat(0xf2c14e, { metalness: 0.7, roughness: 0.35 }), 0.55, 0.6, 0.76));
+  for (const x of [-0.6, -0.45]) g.add(mesh(new THREE.BoxGeometry(0.1, 0.5, 0.3), mat(0x5f7d48), x, 0.25, 0.92));   // crates by the door
+  return g;
+}
+
+// Machines are scaled to the ground they cover: the widest side of each model
+// spans its footprint, so a mining excavator really does dwarf a mini.
 const BUILD: Record<string, () => THREE.Group> = {
   bucket, barrow, atv, sieve, pan, sluice, excavator, excavator2: excavator, excavator3: excavator, excavator4: excavator, dozer, truck: () => truck(false), fueltruck: () => truck(true),
-  trommel, washplant, crusher, mill, pump, tank, tank2: tank, tank3: tank,
+  trommel, washplant, crusher, mill, pump, tank, tank2: tank, tank3: tank, woodfence, chainfence, tower, armory,
 };
+const FILL_SHARE: Record<string, number> = { excavator: 1.35, excavator2: 1.2, excavator3: 1.15, excavator4: 1.1, dozer: 0.98, truck: 0.98, fueltruck: 0.98, tank: 0.8, pump: 0.7, trommel: 0.98 };
+const NO_FIT = new Set(['bucket', 'barrow', 'atv', 'sieve', 'pan', 'sluice', 'woodfence', 'chainfence', 'tower', 'armory']);
 
 export function makeItem(kind: string): THREE.Group {
   const inner = (BUILD[kind] ?? sluice)();
-  // bigger machines are the same model scaled up, wrapped so the outer group stays at scale 1
-  const g = new THREE.Group(); inner.scale.setScalar(SCALE[kind] ?? 1); g.add(inner);
+  const g = new THREE.Group(); g.add(inner);
+  if (!NO_FIT.has(kind)) {
+    const [w, h] = footprint(kind), size = new THREE.Box3().setFromObject(inner).getSize(new THREE.Vector3());
+    const long = Math.max(w, h), short = Math.min(w, h), mLong = Math.max(size.x, size.z), mShort = Math.min(size.x, size.z);
+    inner.scale.setScalar(Math.min(long / mLong, short / mShort * 1.25) * (FILL_SHARE[kind] ?? 0.94));
+    // Lay the long side of the model along the long side of the footprint.
+    if (!(kind in VEHICLES) && (size.x >= size.z) !== (w >= h)) inner.rotation.y = Math.PI / 2;
+  }
   g.userData.kind = kind;
   return g;
 }
@@ -369,7 +479,7 @@ export function renderIcons(): Record<string, string> {
   for (const kind of ['bucket', 'barrow', 'atv']) for (const c of ['empty', 'paydirt', 'fines']) { const g = makeItem(kind); setContents(g, c); shot(`${kind}_${c}`, g); }
   for (const kind of Object.keys(BUILD)) if (!(kind in out) && !['bucket', 'barrow', 'atv'].includes(kind)) shot(kind, makeItem(kind));
   shot('drill', drillIcon());
-  shot('miner_boss', makeMiner('boss').group); for (const v of [0, 1, 2] as const) shot('miner_' + v, makeMiner(v).group);
+  for (const v of ['boss', 0, 1, 2, 'guard', 'bandit', 'thief'] as const) { const m = makeMiner(v); if (v === 'guard') m.tools.rifle.visible = true; shot('miner_' + v, m.group); }
   r.dispose(); r.forceContextLoss();
   return out;
 }

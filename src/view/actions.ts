@@ -6,7 +6,7 @@ import type { Session } from './session';
 
 export interface Action { label: string; cmd: Command; strong: boolean }
 
-export const ITEM_NAME: Record<string, string> = { bucket: 'bucket', barrow: 'wheelbarrow', sieve: 'sieve', pan: 'gold pan', sluice: 'sluice box', excavator: 'mini excavator', excavator2: 'mid excavator', excavator3: 'large excavator', excavator4: 'mining excavator', dozer: 'dozer', truck: 'dump truck', fueltruck: 'fuel truck', trommel: 'trommel', washplant: 'wash plant', crusher: 'crusher', mill: 'mill', pump: 'pump', tank: 'diesel tank', tank2: '500-gallon tank', tank3: '2,000-gallon tank', atv: 'ATV' };
+export const ITEM_NAME: Record<string, string> = { woodfence: 'wood fence', chainfence: 'chain link fence', tower: 'guard tower', armory: 'armory', bucket: 'bucket', barrow: 'wheelbarrow', sieve: 'sieve', pan: 'gold pan', sluice: 'sluice box', excavator: 'mini excavator', excavator2: 'mid excavator', excavator3: 'large excavator', excavator4: 'mining excavator', dozer: 'dozer', truck: 'dump truck', fueltruck: 'fuel truck', trommel: 'trommel', washplant: 'wash plant', crusher: 'crusher', mill: 'mill', pump: 'pump', tank: 'diesel tank', tank2: '500-gallon tank', tank3: '2,000-gallon tank', atv: 'ATV' };
 
 // What a right-click means for one unit. Used for both the cursor hint and the command sent.
 export function decide(ses: Session, u: Unit, tx: number, ty: number, fx: number, fy: number, item: Item | undefined, shift: boolean): Action {
@@ -14,6 +14,7 @@ export function decide(ses: Session, u: Unit, tx: number, ty: number, fx: number
   const carried = itemById(s, u.carrying);
   const t = tileAt(s, tx, ty);
   const move: Action = { label: 'Walk here', cmd: { c: 'move', p, units: [u.id], x: fx, y: fy }, strong: false };
+  if (u.role === 'guard') return { ...move, label: 'Stand guard here', strong: true };
   // In a machine: drive it, or put it to work on the claim.
   if (u.vehicle >= 0) {
     const vk = itemById(s, u.vehicle)?.kind ?? '';

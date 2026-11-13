@@ -60,7 +60,39 @@ export function bandOf(gramsPerLoad: number): number {
 
 export type ItemKind = 'bucket' | 'barrow' | 'atv' | 'sieve' | 'pan' | 'sluice'
   | 'excavator' | 'excavator2' | 'excavator3' | 'excavator4' | 'dozer' | 'truck' | 'fueltruck'
-  | 'trommel' | 'washplant' | 'crusher' | 'mill' | 'pump' | 'tank' | 'tank2' | 'tank3';
+  | 'trommel' | 'washplant' | 'crusher' | 'mill' | 'pump' | 'tank' | 'tank2' | 'tank3'
+  | 'woodfence' | 'chainfence' | 'tower' | 'armory';
+
+// How many tiles each piece of gear covers (width x depth), roughly true to life at
+// 10 ft a tile. Anything not listed covers one tile. item.x, item.y is the top-left tile.
+export const FOOTPRINT: Record<string, [number, number]> = {
+  trommel: [2, 1], washplant: [3, 2], crusher: [2, 2], mill: [2, 2], tank2: [2, 1], tank3: [2, 2],
+  excavator2: [2, 1], excavator3: [2, 2], excavator4: [3, 3], dozer: [2, 1], truck: [2, 1], fueltruck: [2, 1],
+  armory: [2, 2],
+};
+export const footprint = (kind: string): [number, number] => FOOTPRINT[kind] ?? [1, 1];
+
+// Raids. Bandits wreck gear and go for the crew; thieves grab cash and run for the map edge.
+export const RAIDER = 99; // owner id of every bandit and thief
+export const RAID = { firstDay: 9, minGapDays: 4, maxGapDays: 6, warnSec: 20, startSize: 2, growEveryDays: 15, maxSize: 12, edgeDist: 26, poorBelow: 10000 };
+export const UNIT_STATS: Record<string, { hp: number; dmg: number; range: number; coolSec: number; speed: number }> = {
+  boss: { hp: 220, dmg: 8, range: 1.3, coolSec: 1, speed: 3.2 },
+  hand: { hp: 70, dmg: 0, range: 0, coolSec: 1, speed: 3.2 },
+  guard: { hp: 150, dmg: 14, range: 5, coolSec: 1, speed: 3.4 },
+  bandit: { hp: 80, dmg: 9, range: 1.3, coolSec: 1, speed: 2.8 },
+  thief: { hp: 45, dmg: 0, range: 1.2, coolSec: 1, speed: 3.6 },
+};
+export const TOWER = { range: 8, dmg: 12, coolSec: 0.8 };
+export const ARMORY_BONUS = 1.5;        // guards and towers hit this much harder while an armory stands
+export const GUARD_SIGHT = 9;
+export const THIEF = { stealSec: 3, share: 0.05, max: 25000 };
+export const REPAIR_SHARE = 0.25;       // of the purchase price, to fix a wrecked machine
+/** Hit points of gear raiders can damage. Anything not listed cannot be attacked. */
+export const ITEM_HP: Record<string, number> = {
+  woodfence: 80, chainfence: 220, tower: 320, armory: 400,
+  trommel: 200, washplant: 400, crusher: 500, mill: 500, pump: 120, tank: 150, tank2: 250, tank3: 400,
+  excavator: 250, excavator2: 400, excavator3: 600, excavator4: 900, dozer: 500, truck: 350, fueltruck: 300,
+};
 
 // Machines. Fuel burn is gallons per game day while the machine is working.
 // Anything a hired hand drives:
@@ -105,6 +137,7 @@ export interface StoreEntry {
   price: number;
   upkeep: number; // dollars per day
   tier: number;
+  defense?: boolean; // listed under Defense in the store, open from the start
 }
 
 export const STORE: StoreEntry[] = [
@@ -129,9 +162,14 @@ export const STORE: StoreEntry[] = [
   { id: 'excavator4', name: 'Mining excavator', blurb: '40 loads a scoop. Breaks bedrock, the richest ground there is.', price: 600000, upkeep: 1250, tier: 5 },
   { id: 'crusher', name: 'Crusher', blurb: 'Takes bedrock ore. Set it touching a mill.', price: 150000, upkeep: 250, tier: 5 },
   { id: 'mill', name: 'Mill', blurb: 'Grinds crushed ore. Set it touching a crusher and a wash plant.', price: 200000, upkeep: 300, tier: 5 },
+  { id: 'woodfence', name: 'Wood fence', blurb: 'One tile of fence. Slows raiders down until they break it. Your crew walks through.', price: 40, upkeep: 0, tier: 1, defense: true },
+  { id: 'chainfence', name: 'Chain link fence', blurb: 'One tile, nearly three times as tough as wood.', price: 120, upkeep: 0, tier: 1, defense: true },
+  { id: 'guard', name: 'Guard', blurb: 'Fights raiders on sight. Select and send them like any hand.', price: 300, upkeep: 60, tier: 1, defense: true },
+  { id: 'tower', name: 'Guard tower', blurb: 'Fires on any raider within 8 tiles.', price: 2500, upkeep: 40, tier: 1, defense: true },
+  { id: 'armory', name: 'Armory', blurb: 'Guards and towers hit 50% harder while it stands.', price: 6000, upkeep: 60, tier: 1, defense: true },
 ];
 // Buying a tier's key item opens the next tier.
 export const TIER_KEYS: Record<string, number> = { sluice: 2, excavator: 3, excavator2: 4, excavator3: 5 };
 
-export const UPKEEP: Record<string, number> = Object.fromEntries(STORE.filter(e => e.upkeep && e.id !== 'worker').map(e => [e.id, e.upkeep]));
-export const PRICE: Record<string, number> = { sieve: 40, pan: 20, ...Object.fromEntries(STORE.filter(e => e.id !== 'worker').map(e => [e.id, e.price])) };
+export const UPKEEP: Record<string, number> = Object.fromEntries(STORE.filter(e => e.upkeep && e.id !== 'worker' && e.id !== 'guard').map(e => [e.id, e.upkeep]));
+export const PRICE: Record<string, number> = { sieve: 40, pan: 20, ...Object.fromEntries(STORE.filter(e => e.id !== 'worker' && e.id !== 'guard').map(e => [e.id, e.price])) };

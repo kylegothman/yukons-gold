@@ -3,8 +3,9 @@ import {
   STORE, TANKS, TICKS_PER_DAY, VEHICLES, bandOf,
 } from '../data/balance';
 import { layerGrade, organicGrade } from '../sim/mapgen';
-import { isContainer, isProcessor, isTank, isVehicle, isWash, itemById, onGround, tileAt, tileLevel } from '../sim/state';
-import { dailyBurn, nextClaimCost } from '../sim/systems/economy';
+import { Unit, isContainer, isDefense, isProcessor, isRaider, isTank, isVehicle, isWash, itemById, onGround, tileAt, tileLevel } from '../sim/state';
+import { daysToRaid } from '../sim/systems/combat';
+import { dailyBurn, nextClaimCost, repairCost } from '../sim/systems/economy';
 import { canDigLayer, linkedSluice, wet } from '../sim/systems/machines';
 import { ITEM_NAME } from './actions';
 import { Session } from './session';
@@ -15,7 +16,8 @@ const $ = (n: number) => '$' + Math.round(n).toLocaleString('en-US');
 const el = (id: string) => document.getElementById(id)!;
 const LAYER_CSS = ['#5d9441', '#8a6a44', '#6b4a2b', '#4f6d8a', '#8b8f96'];
 const ICON: Record<string, string> = { bucket: 'bucket_empty', barrow: 'barrow_empty', atv: 'atv_empty', worker: 'miner_0' };
-const iconOf = (id: string) => ICON[id] ?? id;
+const iconOf = (id: string) => ICON[id] ?? (id === 'guard' ? 'miner_guard' : id);
+const face = (u: Unit) => 'miner_' + (u.role === 'hand' ? u.id % 3 : u.role);
 const TIER_NAMES = ['', 'hand tools', 'first machines', 'the brown layer', 'the blue layer', 'bedrock'];
 
 export class Hud {
@@ -30,6 +32,7 @@ export class Hud {
         <div class="stat"><label>Burn</label><b id="burn" class="neg"></b><small id="burnsub">living + wages + upkeep</small></div>
         <div class="stat"><label>Gold recovered</label><b id="gold" class="goldc"></b><small id="goldsub"></small></div>
         <div class="dial" title="Time of day"><div id="dialarm"><i class="sun"></i><i class="moon"></i></div></div>
+        <div class="stat" id="s-raid"><label>Raiders</label><b id="raid"></b><small id="raidsub"></small></div>
         <div class="stat wide"><label id="daylabel">Day 1</label><div class="track"><i id="daybar"></i></div><small id="daysub"></small></div>
         <div class="speed" id="speed">
           <button data-s="0" title="Pause (Space)">❚❚</button><button data-s="1" title="1">1x</button><button data-s="2" title="2">2x</button><button data-s="4" title="3">4x</button><button id="mute" title="Sound on or off">♪</button>
@@ -41,6 +44,7 @@ export class Hud {
         <div id="mini" class="panel"><div class="mm"><canvas id="mm" width="128" height="128"></canvas></div><div class="legend" id="legend"></div></div>
         <div id="tile" class="panel"></div>
       </div>
+      <div id="crew"></div>
       <div id="bar">
         <button id="b-pan"><kbd>T</kbd><span>Test pan</span></button>
         <button id="b-drill" style="display:none"><kbd>R</kbd><span>Core drill</span></button>
@@ -77,7 +81,7 @@ export class Hud {
       const buy = t.closest<HTMLElement>('[data-buy]')?.dataset.buy;
       if (!buy) return;
       if (ses.player.cash < (STORE.find(e => e.id === buy)?.price ?? 0)) return this.toast('Not enough cash');
-      if (buy === 'worker' || buy === 'drill') { ses.send({ c: 'buy', p: ses.me, what: buy }); if (ses.paused) this.toast('Done: takes effect when you unpause'); if (buy === 'drill') this.open(''); }
+      if (buy === 'drill') { ses.send({ c: 'buy', p: ses.me, what: buy }); if (ses.paused) this.toast('Done: takes effect when you unpause'); this.open(''); }
       else { ses.mode = 'place'; ses.pending = buy; this.open(''); } // pick where it is delivered
     });
     el('sel').addEventListener('click', e => {
@@ -91,6 +95,21 @@ export class Hud {
       else if (act === 'move') { ses.mode = 'move'; ses.pending = id; }
       else if (act === 'fuel') ses.send({ c: 'fuel', p: ses.me, item: id });
       else if (act === 'dismount') ses.send({ c: 'dismount', p: ses.me, unit: id });
+      else if (act === 'repair') ses.send({ c: 'repair', p: ses.me, item: id });
+      else if (act === 'driver') {
+        // The nearest hand with nothing better to do climbs in.
+        const it = itemById(ses.state, id), free = ses.state.units.filter(u => u.owner === ses.me && u.role === 'hand' && u.vehicle < 0);
+        const pick = (free.filter(u => !u.job).length ? free.filter(u => !u.job) : free).sort((a, b) => Math.hypot(a.x - it!.x, a.y - it!.y) - Math.hypot(b.x - it!.x, b.y - it!.y))[0];
+        if (it && pick) { ses.send({ c: 'drive', p: ses.me, unit: pick.id, item: it.id }); this.toast(`${pick.name} is on the way`); } else this.toast('No hired hand is free: hire one at the store');
+      }
+    });
+    // The crew bar: click a face to select, Shift to add, double-click to jump there.
+    el('crew').addEventListener('click', e => {
+      const c = (e.target as HTMLElement).closest<HTMLElement>('[data-u]'); if (!c) return;
+      const id = Number(c.dataset.u), u = ses.state.units.find(q => q.id === id); if (!u) return;
+      if (!(e as MouseEvent).shiftKey) ses.selUnits.clear();
+      ses.selUnits.add(id); ses.selItem = -1;
+      if ((e as MouseEvent).detail >= 2) document.dispatchEvent(new CustomEvent('hud-look', { detail: { x: u.x, y: u.y } }));
     });
     document.addEventListener('click', e => { if ((e.target as HTMLElement).closest('button')) ses.sfx.play('click'); }, true);
     document.addEventListener('visibilitychange', () => { if (document.hidden) ses.save(); });
@@ -100,7 +119,7 @@ export class Hud {
       this.renderGoals();
     });
     // Saves and settings from builds before the rename are no longer readable: clear them out.
-    try { for (const k of ['gold-digger-save-v2', 'gold-digger-muted', 'gold-digger-save']) localStorage.removeItem(k); } catch { /* fine */ }
+    try { for (const k of ['yukons-gold-save-v3', 'gold-digger-save-v2', 'gold-digger-muted', 'gold-digger-save']) localStorage.removeItem(k); } catch { /* fine */ }
     this.startScreen();
     this.phoneNotice();
     const loop = (t: number) => { this.update(t); requestAnimationFrame(loop); };
@@ -131,27 +150,31 @@ export class Hud {
       <li>Spend gold at the <b>store</b> (B): hired hands, wheelbarrow, sluice box.</li></ol>
       <p>Cash drains every day. At $0 the season is over. Survive ${SEASON_DAYS} days with as much cash as you can.</p></div><div>
       <h3>Controls</h3><table>
-      <tr><td>Left-click / drag</td><td>Select a miner or gear / box-select a crew</td></tr>
+      <tr><td>Left-click / drag</td><td>Select one person or one piece of gear / box-select a crew. Double-click takes everyone of that kind on screen</td></tr>
+      <tr><td>Crew bar</td><td>Click a face at the bottom to select that person; double-click to jump to them</td></tr>
+      <tr><td>Ctrl+1..9, then 1..9</td><td>Save a group, then recall it (press again to jump there)</td></tr>
+      <tr><td>Tab / X</td><td>Next idle hand / stop what the selection is doing</td></tr>
       <tr><td>Right-click</td><td>Walk, pick up, dig, use a station</td></tr>
       <tr><td>M</td><td>Move the selected bucket, sieve, pan or sluice: click where it should go</td></tr>
       <tr><td>Q / E</td><td>Rotate the camera</td></tr>
       <tr><td>G</td><td>Drop what you carry</td></tr>
-      <tr><td>F</td><td>Find and select your miner</td></tr>
+      <tr><td>F</td><td>Find and select Yukon</td></tr>
       <tr><td>WASD / arrows</td><td>Move the camera (two-finger scroll and middle-drag also work)</td></tr>
       <tr><td>Scroll wheel, pinch, + / -</td><td>Zoom</td></tr>
       <tr><td>Space, 1, 2, 3</td><td>Pause, 1x, 2x, 4x speed</td></tr></table>
-      <h3>Going deeper</h3><p>The ground has five layers. Each needs bigger gear: a mini excavator for topsoil; a dozer to rip the brown layer and a mid excavator to dig it; a large excavator for the blue layer; a mining excavator, crusher and mill for bedrock, the richest of all. A tile can only go one layer deeper than the tiles around it, so deep pits need to be wide. Buy the drill rig and press <kbd>R</kbd> to read every layer of a tile before you commit.</p><h3>Machines</h3><p>Buying a sluice box unlocks them. Set a <b>trommel</b> on a tile touching a sluice and a <b>diesel tank</b> within 8 tiles. Right-click a hired hand onto the <b>excavator</b>, then right-click your claim. It digs, dumps into the trommel, and the trommel feeds the sluice. Topsoil can only be dug once the organic layer is off the four tiles around it.</p><h3>Hired hands</h3><p>Select a hand and right-click your claim. They <b>mine on their own</b>: dig, screen, wash, repeat. Add more hands the same way.</p><p>Optional: right-click a hand onto the sieve or pan to <b>staff it full time</b>. Everyone else, you included, then just drops buckets there and walks off.</p>
+      <h3>Raiders</h3><p>From day 9 thieves and bandits come for the camp, more of them the richer you are. Thieves take cash and run for the map edge: stop them and you get it back. Bandits wreck machines and go for the crew. Buy guards, towers and fences under Defense in the store. If Yukon falls, the season is over.</p><h3>Going deeper</h3><p>The ground has five layers. Each needs bigger gear: a mini excavator for topsoil; a dozer to rip the brown layer and a mid excavator to dig it; a large excavator for the blue layer; a mining excavator, crusher and mill for bedrock, the richest of all. A tile can only go one layer deeper than the tiles around it, so deep pits need to be wide. Buy the drill rig and press <kbd>R</kbd> to read every layer of a tile before you commit.</p><h3>Machines</h3><p>Buying a sluice box unlocks them. Set a <b>trommel</b> on a tile touching a sluice and a <b>diesel tank</b> within 8 tiles. Right-click a hired hand onto the <b>excavator</b>, then right-click your claim. It digs, dumps into the trommel, and the trommel feeds the sluice. Topsoil can only be dug once the organic layer is off the four tiles around it.</p><h3>Hired hands</h3><p>Select a hand and right-click your claim. They <b>mine on their own</b>: dig, screen, wash, repeat. Add more hands the same way.</p><p>Optional: right-click a hand onto the sieve or pan to <b>staff it full time</b>. Everyone else, you included, then just drops buckets there and walks off.</p>
       </div></div><button class="primary" data-close>Got it</button></div>`;
   }
 
   renderStore() {
     const pl = this.ses.player, cash = pl.cash;
-    const card = (e: typeof STORE[number]) => { const locked = e.tier > pl.tier, owned = e.id === 'drill' && pl.drill; return `<button class="card ${cash < e.price ? 'poor' : ''} ${locked || owned ? 'lockedc' : ''}" ${locked || owned ? 'disabled' : `data-buy="${e.id}"`}>
+    const card = (e: typeof STORE[number]) => { const locked = e.tier > pl.tier, owned = e.id === 'drill' && pl.drill; return `<button class="card ${cash < e.price ? 'poor' : ''} ${locked || owned ? 'lockedc' : ''}" data-price="${e.price}" ${locked || owned ? 'disabled' : `data-buy="${e.id}"`}>
         <img src="${this.icon(iconOf(e.id))}" alt=""><b>${e.name}</b><span>${e.blurb}</span>
         <em>${owned ? 'Owned' : $(e.price)}${e.upkeep && !owned ? ` <small>+ ${$(e.upkeep)}/day</small>` : ''}</em></button>`; };
     const key = ['', 'a sluice box', 'a mini excavator', 'a mid excavator', 'a large excavator'];
     el('modal').innerHTML = `<div class="sheet panel wide"><h2>Supply store</h2><p class="sub">Pick gear, then click the spot where you want it delivered. Gear sells back at ${SELL_BACK * 100}%. Diesel is ${$(DIESEL_PRICE)} a gallon.</p>
-      ${[1, 2, 3, 4, 5].map(t => `<h3>Tier ${t}: ${TIER_NAMES[t]} ${t > pl.tier ? `<small class="lk">locked: buy ${key[t - 1]} first</small>` : ''}</h3><div class="cards">${STORE.filter(e => e.tier === t).map(card).join('')}</div>`).join('')}
+      ${[1, 2, 3, 4, 5].map(t => `<h3>Tier ${t}: ${TIER_NAMES[t]} ${t > pl.tier ? `<small class="lk">locked: buy ${key[t - 1]} first</small>` : ''}</h3><div class="cards">${STORE.filter(e => e.tier === t && !e.defense).map(card).join('')}</div>`).join('')}
+      <h3>Defense <small class="lk" style="color:var(--gold)">raiders turn up from day 9, and more of them the richer you get</small></h3><div class="cards">${STORE.filter(e => e.defense).map(card).join('')}</div>
       <button class="primary" data-close>Close</button></div>`;
   }
 
@@ -184,10 +207,10 @@ export class Hud {
   }
 
   endScreen() {
-    const s = this.ses.state, p = this.ses.player, broke = s.over === 'broke';
+    const s = this.ses.state, p = this.ses.player, broke = s.over === 'broke', dead = s.over === 'dead';
     const day = Math.min(SEASON_DAYS, Math.floor(s.tick / TICKS_PER_DAY) + 1);
     el('screen').innerHTML = `<div class="cover"><div class="title panel">
-      <h1>${broke ? 'BUSTED' : 'SEASON OVER'}</h1><div class="wt">${broke ? `Out of cash on day ${day}` : `You made it through all ${SEASON_DAYS} days`}</div>
+      <h1>${dead ? 'YUKON IS DOWN' : broke ? 'BUSTED' : 'SEASON OVER'}</h1><div class="wt">${dead ? `Raiders got to Yukon on day ${day}. Guards, towers and fences keep them off him.` : broke ? `Out of cash on day ${day}` : `You made it through all ${SEASON_DAYS} days`}</div>
       <div class="score"><div><label>Final cash</label><b>${$(p.cash)}</b></div><div><label>Gold recovered</label><b>${p.goldGrams.toFixed(1)} g</b></div>
       <div><label>Gold sold</label><b>${$(p.earned)}</b></div><div><label>Tiles dug out</label><b>${p.tilesDug}</b></div>
       <div><label>Loads washed</label><b>${p.loadsWashed}</b></div><div><label>Claims</label><b>${p.claims}</b></div></div>
@@ -231,9 +254,27 @@ export class Hud {
     el('mode').style.display = ses.mode ? 'block' : 'none';
     const secs = runway * 60 / (ses.paused ? 1 : ses.speed);
     el('warn').textContent = ses.started && !s.over && runway < 1.5 ? `Broke in ${Math.ceil(secs)} seconds` : '';
-    if (this.modal === 'store') el('modal').querySelectorAll<HTMLElement>('.card').forEach((c, i) => c.classList.toggle('poor', p.cash < STORE[i].price));
+    if (this.modal === 'store') el('modal').querySelectorAll<HTMLElement>('.card').forEach(c => c.classList.toggle('poor', p.cash < Number(c.dataset.price)));
+    const raiders = s.units.filter(isRaider).length, toRaid = daysToRaid(s);
+    el('s-raid').classList.toggle('danger', raiders > 0 || s.raid.spawnAt >= 0);
+    el('raid').textContent = raiders ? `${raiders} in camp!` : s.raid.spawnAt >= 0 ? 'Incoming!' : toRaid > 50 ? 'None' : `in ${toRaid < 1 ? Math.ceil(toRaid * 60) + ' sec' : toRaid.toFixed(1) + ' days'}`;
+    const gd = s.units.filter(u => u.owner === ses.me && u.role === 'guard').length, tw = s.items.filter(i => i.kind === 'tower' && i.owner === ses.me).length;
+    el('raidsub').textContent = `${gd} guard${gd === 1 ? '' : 's'}, ${tw} tower${tw === 1 ? '' : 's'}`;
+    this.renderCrew();
     this.renderGoals(); this.renderSel(); this.renderTile(); if (time - this.lastMini > 600) { this.lastMini = time; this.renderMini(); }
   }
+
+  /** A face for everyone on the payroll, so nobody has to be hunted for on the map. */
+  renderCrew() {
+    const ses = this.ses, s = ses.state;
+    const html = s.units.filter(u => u.owner === ses.me).map(u => {
+      const idle = u.role === 'hand' && !u.job && !u.queue.length && u.vehicle < 0, f = Math.max(0, u.hp / u.maxHp);
+      const veh = u.vehicle >= 0 ? ITEM_NAME[itemById(s, u.vehicle)?.kind ?? ''] : '';
+      return `<button data-u="${u.id}" class="${ses.selUnits.has(u.id) ? 'on' : ''} ${idle ? 'idle' : ''}" title="${u.name}: ${veh ? 'driving the ' + veh : u.status}"><img src="${this.icon(face(u))}" alt=""><span>${u.name}</span><i style="width:${(f * 100).toFixed(0)}%;background:${f > 0.5 ? '#7ddc6a' : f > 0.25 ? '#f2c14e' : '#ff5a4a'}"></i>${idle ? '<em>?</em>' : veh ? '<em class="v">&#9881;</em>' : ''}</button>`;
+    }).join('');
+    if (this.crewHtml !== html) { this.crewHtml = html; el('crew').innerHTML = html; }
+  }
+  crewHtml = '';
 
   /** The tutorial: one short checklist per tier, shown until it is done. It can be minimized. */
   renderGoals() {
@@ -296,7 +337,7 @@ export class Hud {
     const ses = this.ses, s = ses.state;
     let html = '';
     const it = itemById(s, ses.selItem);
-    const units = s.units.filter(u => ses.selUnits.has(u.id));
+    const units = s.units.filter(u => ses.selUnits.has(u.id) && u.owner === ses.me);
     if (it) {
       const name = ITEM_NAME[it.kind];
       let body = '';
@@ -316,19 +357,22 @@ export class Hud {
         body = `In: ${inn ? (inn.contents === 'fines' ? 'fines' : 'pay dirt') : 'empty'}` + (it.kind === 'sieve' ? ` &middot; Out: ${out ? 'fines ready' : 'empty'}` : '');
         if (isWash(it.kind) && onGround(it) && !wet(s, it.x, it.y, ses.me)) body += `<div class="bad">Needs water. Move it beside the creek, or add a pump.</div>`;
       }
+      if (it.maxHp > 0) body += ` &middot; condition ${Math.round(100 * it.hp / it.maxHp)}%`;
       if (it.note) body += `<div class="bad">${it.note}</div>`;
+      if (it.maxHp > 0 && it.hp < it.maxHp) extra += `<button data-a="repair" data-id="${it.id}">Repair (${$(repairCost(it))})</button>`;
+      if (isVehicle(it.kind) && it.driver < 0 && it.hp > 0) extra += `<button data-a="driver" data-id="${it.id}">Send a driver</button>`;
       html = `<div class="head"><img src="${this.icon(isContainer(it.kind) ? it.kind + '_' + it.contents : it.kind)}"><div><b>${name[0].toUpperCase() + name.slice(1)}</b><small>${body}</small></div></div>
-        <div class="btns">${extra}${isVehicle(it.kind) ? '' : `<button data-a="move" data-id="${it.id}">Move <kbd>M</kbd></button>`}<button data-a="sell" data-id="${it.id}">Sell for ${$((PRICE[it.kind] ?? 0) * SELL_BACK)}</button></div>`;
+        <div class="btns">${extra}${isVehicle(it.kind) || isDefense(it.kind) ? '' : `<button data-a="move" data-id="${it.id}">Move <kbd>M</kbd></button>`}<button data-a="sell" data-id="${it.id}">Sell for ${$((PRICE[it.kind] ?? 0) * SELL_BACK)}</button></div>`;
     } else if (units.length === 1) {
       const u = units[0], c = itemById(s, u.carrying);
       const carry = c ? `Carrying ${ITEM_NAME[c.kind]}${isContainer(c.kind) && c.contents !== 'empty' ? ` (${c.contents === 'fines' ? 'fines' : 'pay dirt'})` : isContainer(c.kind) ? ' (empty)' : ''}` : 'Hands free';
-      const job = u.boss ? '' : `<div class="job">${u.vehicle >= 0 ? (u.job ? `Job: ${ITEM_NAME[itemById(s, u.vehicle)?.kind ?? ''] ?? 'machine'} driver` : 'In the cab: right-click your claim to put it to work') : !u.job ? 'No job: right-click your claim to start them mining' : u.job.type === 'dig' ? 'Job: miner (digs, screens, washes)' : itemById(s, u.job.station)?.kind === 'sieve' ? 'Job: sieve operator' : 'Job: washer'}</div>`;
-      html = `<div class="head"><img src="${this.icon(u.boss ? 'miner_boss' : 'miner_' + (u.id % 3))}"><div><b>${u.boss ? 'You, the prospector' : u.name + ', hired hand'}</b><small>${u.status}${u.vehicle >= 0 ? '' : ' &middot; ' + carry}</small></div></div>${job}
+      const job = u.boss || u.role === 'guard' ? (u.role === 'guard' ? '<div class="job">Fights any raider in sight. Right-click to post them somewhere else.</div>' : '') : `<div class="job">${u.vehicle >= 0 ? (u.job ? `Job: ${ITEM_NAME[itemById(s, u.vehicle)?.kind ?? ''] ?? 'machine'} driver` : 'In the cab: right-click your claim to put it to work') : !u.job ? 'No job: right-click your claim to start them mining' : u.job.type === 'dig' ? 'Job: miner (digs, screens, washes)' : itemById(s, u.job.station)?.kind === 'sieve' ? 'Job: sieve operator' : 'Job: washer'}</div>`;
+      html = `<div class="head"><img src="${this.icon(face(u))}"><div><b>${u.boss ? 'Yukon, the prospector' : u.name + (u.role === 'guard' ? ', guard' : ', hired hand')}</b><small>Health ${Math.max(0, Math.round(u.hp))} of ${u.maxHp} &middot; ${u.status}${u.vehicle >= 0 ? '' : ' &middot; ' + carry}</small></div></div>${job}
         <div class="btns">${u.boss ? `<button data-a="pan">Test pan <kbd>T</kbd></button>` : ''}${c ? `<button data-a="drop" data-id="${u.id}">Drop <kbd>G</kbd></button>` : ''}
         ${u.vehicle >= 0 ? `<button data-a="dismount" data-id="${u.id}">Get out</button>` : ''}${!u.boss && u.job ? `<button data-a="clear" data-id="${u.id}">Stop job</button>` : ''}${!u.boss ? `<button data-a="fire" data-id="${u.id}" class="warnb">Let go</button>` : ''}</div>`;
     } else if (units.length > 1) {
-      html = `<div class="head"><img src="${this.icon('miner_0')}"><div><b>${units.length} selected</b><small>${units.map(u => u.name).join(', ')}</small></div></div><div class="dim">Right-click your claim to set them all mining.</div>`;
-    } else html = `<div class="dim">Nothing selected. Left-click your miner, or press <kbd>F</kbd> to find them.</div>`;
+      html = `<div class="head"><img src="${this.icon('miner_0')}"><div><b>${units.length} selected</b><small>${units.map(u => u.name).join(', ')}</small></div></div><div class="dim">Right-click your claim to set the hands mining; guards go where you point. <kbd>Ctrl</kbd>+<kbd>1</kbd> saves this group, <kbd>1</kbd> recalls it.</div>`;
+    } else html = `<div class="dim">Nothing selected. Left-click Yukon or a hand, drag a box round a crew, or use the faces along the bottom. <kbd>F</kbd> finds Yukon, <kbd>Tab</kbd> the next idle hand.</div>`;
     if (el('sel').innerHTML !== html) el('sel').innerHTML = html;
   }
 
@@ -370,7 +414,7 @@ export class Hud {
       if (t.owner === me) { const x = i % n, y = (i / n) | 0; if (x === 0 || y === 0 || x === n - 1 || y === n - 1 || s.tiles[i - 1].owner !== me || s.tiles[i + 1].owner !== me || s.tiles[i - n].owner !== me || s.tiles[i + n].owner !== me) c = 0xf2c14e; }
       put(i, c);
     }
-    for (const u of s.units) { const x = Math.floor(u.x), y = Math.floor(u.y); for (let dy = 0; dy < (n > 100 ? 2 : 1); dy++) for (let dx = 0; dx < (n > 100 ? 2 : 1); dx++) if (x + dx < n && y + dy < n) put((y + dy) * n + x + dx, u.boss ? 0xff5a3c : 0xffffff); }
+    for (const u of s.units) { const x = Math.floor(u.x), y = Math.floor(u.y); for (let dy = 0; dy < (n > 100 ? 2 : 1); dy++) for (let dx = 0; dx < (n > 100 ? 2 : 1); dx++) if (x + dx < n && y + dy < n) put((y + dy) * n + x + dx, isRaider(u) ? (Date.now() % 600 < 300 ? 0xff2a1a : 0x1b0500) : u.role === 'guard' ? 0x6ab0ff : u.boss ? 0xffd24a : 0xffffff); }
     ctx.putImageData(img, 0, 0);
   }
   miniImg: ImageData | null = null;

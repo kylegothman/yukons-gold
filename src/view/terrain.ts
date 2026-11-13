@@ -103,7 +103,7 @@ export class Terrain {
     this.mesh = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ vertexColors: true, map: detailTexture(), roughness: 0.95, metalness: 0 }));
     this.mesh.receiveShadow = true;
     this.nor = new THREE.BufferAttribute(new Float32Array(G * G * 3), 3); geo.setAttribute('normal', this.nor);
-    for (let ty = 0; ty < n; ty++) for (let tx = 0; tx < n; tx++) if (s.tiles[ty * n + tx].organicLeft < ORGANIC_LOADS_PER_TILE && !s.tiles[ty * n + tx].water) this.updateTile(tx, ty, false);
+    for (let ty = 0; ty < n; ty++) for (let tx = 0; tx < n; tx++) if (s.tiles[ty * n + tx].organicLeft < ORGANIC_LOADS_PER_TILE && !s.tiles[ty * n + tx].water) this.updateTile(tx, ty, true);
     for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) this.normalAt(i, j);
     this.dirty = false; this.lo = Infinity; this.hi = -1;
     geo.computeBoundingSphere(); geo.boundingSphere!.radius += 6;
@@ -142,15 +142,37 @@ export class Terrain {
     fn(x0, y0); if (x1 !== x0) fn(x1, y0);
     if (y1 !== y0) { fn(x0, y1); if (x1 !== x0) fn(x1, y1); }
   }
-  /** How far a tile has been dug down, in world units. */
-  private dug(ex: number, ey: number): number {
-    const tx = ex - this.M, ty = ey - this.M, n = this.n;
-    if (tx < 0 || ty < 0 || tx >= n || ty >= n) return 0;
-    const t = this.s.tiles[ty * n + tx];
+  /** How far a tile has really been dug down, in world units. */
+  private target(i: number): number {
+    const t = this.s.tiles[i];
     if (t.water || t.organicLeft >= ORGANIC_LOADS_PER_TILE) return 0;
     let d = 0.08 * (t.organicLeft / ORGANIC_LOADS_PER_TILE);
     for (let k = 0; k < 5; k++) d += DEPTH[k] * (1 - t[LAYER_KEYS[k]] / LAYER_LOADS[k]);
     return d;
+  }
+  // The depth drawn on screen trails the real one, so ground sinks as it is dug instead of snapping.
+  private shown: Float32Array | null = null;
+  private sinking = new Set<number>();
+  private dug(ex: number, ey: number): number {
+    const tx = ex - this.M, ty = ey - this.M, n = this.n;
+    if (tx < 0 || ty < 0 || tx >= n || ty >= n) return 0;
+    return this.shown ? this.shown[ty * n + tx] : 0;
+  }
+  /** A tile changed: sink it to its new depth over the next moments, or at once when loading. */
+  updateTile(tx: number, ty: number, snap = false) {
+    const n = this.n, i = ty * n + tx;
+    if (!this.shown) this.shown = new Float32Array(n * n);
+    if (snap) { this.shown[i] = this.target(i); this.sinking.delete(i); this.reshape(tx, ty); } else this.sinking.add(i);
+  }
+  /** Ease every sinking tile toward its real depth. Call once a frame. */
+  animate(dt: number) {
+    if (!this.sinking.size || !this.shown) return;
+    const n = this.n, k = Math.min(1, dt * 2.2);
+    for (const i of this.sinking) {
+      const want = this.target(i), d = want - this.shown[i];
+      if (Math.abs(d) < 0.004) { this.shown[i] = want; this.sinking.delete(i); } else this.shown[i] += d * k;
+      this.reshape(i % n, (i / n) | 0);
+    }
   }
   isWater(tx: number, ty: number) { const ex = tx + this.M, ey = ty + this.M; return ex >= 0 && ey >= 0 && ex < this.E && ey < this.E && this.wflag[ey * this.E + ex] === 1; }
   waterDist(tx: number, ty: number) { const ex = tx + this.M, ey = ty + this.M; return ex >= 0 && ey >= 0 && ex < this.E && ey < this.E ? this.dist[ey * this.E + ex] : 0; }
@@ -162,7 +184,7 @@ export class Terrain {
   }
 
   /** Re-shape and re-colour the nine vertices of a tile after digging. */
-  updateTile(tx: number, ty: number, normals = true) {
+  private reshape(tx: number, ty: number, normals = true) {
     const G = this.G, i0 = (tx + this.M) * 2, j0 = (ty + this.M) * 2;
     for (let j = j0; j <= j0 + 2; j++) for (let i = i0; i <= i0 + 2; i++) {
       const v = j * G + i;

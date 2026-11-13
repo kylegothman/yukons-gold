@@ -5,7 +5,7 @@ import { SaveData, deserialize, serialize } from '../sim/save';
 import type { GameState } from '../sim/state';
 import { Sfx } from './audio';
 
-const SAVE_KEY = 'yukons-gold-save-v3';
+const SAVE_KEY = 'yukons-gold-save-v4';
 
 // Shared between the Phaser scene and the DOM HUD. Holds the sim state, the
 // outgoing command queue, and view-only UI state (selection, modes, speed).
@@ -41,7 +41,7 @@ export class Session {
     } catch { /* play on without a save */ }
   }
   static peekSave(): SaveData | null {
-    try { const raw = localStorage.getItem(SAVE_KEY); const d = raw ? JSON.parse(raw) : null; return d && d.v === 3 && d.core && !d.core.over ? d : null; } catch { return null; }
+    try { const raw = localStorage.getItem(SAVE_KEY); const d = raw ? JSON.parse(raw) : null; return d && d.v === 4 && d.core && !d.core.over ? d : null; } catch { return null; }
   }
   resume(): boolean {
     const d = Session.peekSave(); if (!d) return false;

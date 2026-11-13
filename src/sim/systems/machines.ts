@@ -1,7 +1,9 @@
 import { CRUSHER, GOLD_PRICE_PER_GRAM, HOPPER, MILL, PUMP, TANKS, TICKS_PER_DAY, TICKS_PER_SEC, TROMMEL, VEHICLES, WASH, WASHPLANT } from '../../data/balance';
-import { GameState, Item, isTank, isVehicle, needsWater, onGround, tileAt, tileLevel, unitById } from '../state';
+import { GameState, Item, rectOf, isTank, isVehicle, needsWater, onGround, tileAt, tileLevel, unitById } from '../state';
 
 const d2 = (a: Item, b: Item) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+/** Wrecked by raiders: it does nothing until it is repaired. */
+export const broken = (it: Item) => it.maxHp > 0 && it.hp <= 0;
 const ticks = (sec: number) => Math.max(1, Math.round(sec * TICKS_PER_SEC));
 
 export function nearWater(s: GameState, x: number, y: number): boolean {
@@ -13,6 +15,13 @@ export function nearWater(s: GameState, x: number, y: number): boolean {
 export function wet(s: GameState, x: number, y: number, owner: number): boolean {
   if (nearWater(s, x, y)) return true;
   return s.items.some(p => p.kind === 'pump' && p.owner === owner && p.running && (p.x - x) ** 2 + (p.y - y) ** 2 <= PUMP.range ** 2);
+}
+
+/** Water for a machine: any tile it covers may touch the creek, or a pump may reach it. */
+export function wetItem(s: GameState, it: Item): boolean {
+  const [x0, y0, x1, y1] = rectOf(it);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) if (nearWater(s, x, y)) return true;
+  return wet(s, it.x, it.y, it.owner);
 }
 
 /** Take diesel from the nearest of the owner's tanks that reaches this machine. */
@@ -28,7 +37,12 @@ export function drawFuel(s: GameState, it: Item, gallons: number): boolean {
 
 /** A machine of the given kind on a tile touching this one. */
 export function touching(s: GameState, it: Item, kind: string): Item | undefined {
-  return s.items.find(i => i.kind === kind && i.owner === it.owner && onGround(i) && Math.abs(i.x - it.x) <= 1 && Math.abs(i.y - it.y) <= 1);
+  const [a0, b0, a1, b1] = rectOf(it);
+  return s.items.find(i => {
+    if (i.kind !== kind || i.owner !== it.owner || !onGround(i) || broken(i)) return false;
+    const [c0, d0, c1, d1] = rectOf(i);
+    return c0 <= a1 + 1 && c1 >= a0 - 1 && d0 <= b1 + 1 && d1 >= b0 - 1;
+  });
 }
 export const linkedSluice = (s: GameState, tr: Item) => touching(s, tr, 'sluice');
 
@@ -62,6 +76,7 @@ function takeLoad(it: Item): number {
 
 export function tickMachines(s: GameState) {
   for (const it of s.items) {
+    if (broken(it)) { it.running = false; it.note = 'Wrecked: repair it'; continue; }
     if (isVehicle(it.kind)) {
       const u = unitById(s, it.driver);
       it.running = !!u && it.fuel > 0 && (u.moving || u.workTotal > 0);
@@ -110,7 +125,7 @@ export function tickMachines(s: GameState) {
       if (next.hopper >= HOPPER.washplant) { it.note = ''; continue; }
     } else {
       burn = WASHPLANT.burnPerDay; sec = WASHPLANT.secPerLoad;
-      if (!wet(s, it.x, it.y, it.owner)) { it.note = 'Needs water: creek or pump'; continue; }
+      if (!wetItem(s, it)) { it.note = 'Needs water: creek or pump'; continue; }
       // report takings every two seconds, not once per load
       if (it.cargo > 0 && s.tick % 20 === 0) { s.events.push({ type: 'gold', owner: it.owner, x: it.x, y: it.y, amount: it.cargo }); it.cargo = 0; }
     }

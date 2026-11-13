@@ -1,15 +1,18 @@
 import {
   CLAIM_COST_GROWTH, CLAIM_SIZE, DIESEL_PRICE, TANKS, TIER_KEYS, FIRST_EXTRA_CLAIM_COST, LIVING_COST_PER_DAY, PRICE, SEASON_DAYS,
-  SELL_BACK, STORE, TICKS_PER_DAY, UPKEEP, WORKER_WAGE_PER_DAY,
+  REPAIR_SHARE, SELL_BACK, STORE, TICKS_PER_DAY, UPKEEP, WORKER_WAGE_PER_DAY,
 } from '../../data/balance';
 import type { ItemKind } from '../../data/balance';
 import { newItem, newUnit } from '../mapgen';
 import { GameState, isContainer, isTank, itemById, onGround, tileAt, unitById } from '../state';
 import { clearQueue, dropCarried } from './orders';
+import { canPlace, dirty, freeSpot, freeTile, standable } from './nav';
+
+const GUARD_WAGE = STORE.find(e => e.id === 'guard')!.upkeep;
 
 export function dailyBurn(s: GameState, p: number): number {
   let burn = LIVING_COST_PER_DAY;
-  for (const u of s.units) if (u.owner === p && !u.boss) burn += WORKER_WAGE_PER_DAY;
+  for (const u of s.units) if (u.owner === p && !u.boss) burn += u.role === 'guard' ? GUARD_WAGE : WORKER_WAGE_PER_DAY;
   for (const i of s.items) if (i.owner === p) burn += UPKEEP[i.kind] ?? 0;
   return burn;
 }
@@ -46,19 +49,28 @@ export function buy(s: GameState, p: number, what: string, px?: number, py?: num
   if (entry.tier > pl.tier) { s.events.push({ type: 'toast', owner: p, text: `Tier ${entry.tier} is still locked` }); return false; }
   if (what === 'drill' && pl.drill) { s.events.push({ type: 'toast', owner: p, text: 'You already own a drill rig' }); return false; }
   if (pl.cash < entry.price) { s.events.push({ type: 'toast', owner: p, text: `Not enough cash for ${entry.name.toLowerCase()}` }); return false; }
+  // Gear is delivered to the tile the player picked, or as near the miner's feet as there is room.
+  const picked = px !== undefined && py !== undefined;
+  const person = what === 'worker' || what === 'guard';
+  let tx = picked ? px! : Math.floor(boss.x), ty = picked ? py! : Math.floor(boss.y);
+  if (person) {
+    if (picked && !standable(s, tx, ty)) { s.events.push({ type: 'toast', owner: p, text: 'Nobody can stand there' }); return false; }
+    if (!picked) [tx, ty] = freeTile(s, tx, ty);
+  } else if (what !== 'drill') {
+    if (picked && !canPlace(s, what, tx, ty)) { s.events.push({ type: 'toast', owner: p, text: 'Something is already there' }); return false; }
+    if (!picked) { const f = freeSpot(s, what, tx, ty); if (!f) { s.events.push({ type: 'toast', owner: p, text: 'No room to set that down here' }); return false; } [tx, ty] = f; }
+  }
   pl.cash -= entry.price;
-  // Gear is delivered to the tile the player picked, or to the miner's feet.
-  const placed = px !== undefined && py !== undefined && !!tileAt(s, px, py);
-  const tx = placed ? px! : Math.floor(boss.x), ty = placed ? py! : Math.floor(boss.y);
   const opens = TIER_KEYS[what];
   if (what === 'drill') {
     pl.drill = true;
     s.events.push({ type: 'buy', owner: p, x: tx, y: ty, text: 'Drill rig ready: press R, then click a tile' });
-  } else if (what === 'worker') {
-    const u = newUnit(s, p, boss.x + 0.4, boss.y + 0.3, false);
-    s.events.push({ type: 'hire', owner: p, x: u.x, y: u.y, text: `${u.name} hired` });
+  } else if (person) {
+    const u = newUnit(s, p, tx + 0.5, ty + 0.5, false, what === 'guard' ? 'guard' : 'hand');
+    if (what === 'guard') u.post = { x: u.x, y: u.y };
+    s.events.push({ type: 'hire', owner: p, x: u.x, y: u.y, text: `${u.name} hired${what === 'guard' ? ' as a guard' : ''}` });
   } else {
-    newItem(s, what as ItemKind, p, tx, ty);
+    newItem(s, what as ItemKind, p, tx, ty); dirty(s);
     s.events.push({ type: 'buy', owner: p, x: tx, y: ty, text: `${entry.name} delivered` });
   }
   if (opens && pl.tier < opens) { pl.tier = opens; s.events.push({ type: 'toast', owner: p, text: `Tier ${opens} unlocked in the store` }); }
@@ -72,9 +84,9 @@ export function sell(s: GameState, p: number, itemId: number): boolean {
   if (it.inSlot >= 0 || it.outSlot >= 0 || it.operator >= 0 || it.hopper > 0 || it.feed > 0 || (isContainer(it.kind) && it.contents !== 'empty')) {
     s.events.push({ type: 'toast', owner: p, text: 'Empty it before selling' }); return false;
   }
-  const value = Math.round((PRICE[it.kind] ?? 0) * SELL_BACK);
+  const value = Math.round((PRICE[it.kind] ?? 0) * SELL_BACK * (it.maxHp > 0 ? Math.max(0.2, it.hp / it.maxHp) : 1));
   s.players[p].cash += value;
-  s.items.splice(s.items.indexOf(it), 1);
+  s.items.splice(s.items.indexOf(it), 1); dirty(s);
   s.events.push({ type: 'toast', owner: p, text: `Sold for $${value}` });
   return true;
 }
@@ -92,6 +104,19 @@ export function dismount(s: GameState, unitId: number) {
   const u = unitById(s, unitId); if (!u || u.vehicle < 0) return;
   const ex = itemById(s, u.vehicle); if (ex) ex.driver = -1;
   clearQueue(s, u); u.vehicle = -1; u.job = null;
+}
+
+/** What it costs to put a damaged machine right. */
+export const repairCost = (it: { kind: string; hp: number; maxHp: number }) => it.maxHp > 0 ? Math.ceil((PRICE[it.kind] ?? 0) * REPAIR_SHARE * (1 - it.hp / it.maxHp)) : 0;
+
+export function repair(s: GameState, p: number, itemId: number): boolean {
+  const it = itemById(s, itemId), pl = s.players[p];
+  if (!it || it.owner !== p || it.maxHp <= 0 || it.hp >= it.maxHp) return false;
+  const cost = repairCost(it);
+  if (pl.cash < cost) { s.events.push({ type: 'toast', owner: p, text: 'Not enough cash for repairs' }); return false; }
+  pl.cash -= cost; it.hp = it.maxHp; it.note = '';
+  s.events.push({ type: 'toast', owner: p, text: `Repaired for $${cost.toLocaleString()}` });
+  return true;
 }
 
 /** Top a diesel tank up from the store, as far as cash allows. */

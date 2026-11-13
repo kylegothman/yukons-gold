@@ -1,14 +1,15 @@
 import {
   ATV_SPEED_BOOST, BANDS, CAPACITY, DIG_SEC_PER_LOAD, DIGGERS, DRILL_FEE, DRILL_SEC, EXCAVATOR, FUEL_TRUCK_CARGO, HOPPER, LAYERS, LAYER_KEYS, VEHICLES, GOLD_PRICE_PER_GRAM, SIEVE_SEC_PER_LOAD, TEST_PAN_ERROR_CHANCE,
-  TEST_PAN_SEC, TICKS_PER_SEC, UNIT_SPEED, UNSCREENED_PENALTY, WASH, bandOf,
+  TEST_PAN_SEC, TICKS_PER_SEC, UNIT_SPEED, UNIT_STATS, UNSCREENED_PENALTY, WASH, bandOf,
 } from '../../data/balance';
 import { layerGrade, organicGrade } from '../mapgen';
 import { canDigLayer, wet } from './machines';
+import { SOLID, canPlace, dirty, distToItem, grid, waypoint } from './nav';
 
 const ITEM_LABEL: Record<string, string> = { trommel: 'trommel', washplant: 'wash plant', crusher: 'crusher', mill: 'mill', truck: 'truck' };
 export { nearWater } from './machines';
 import { nextRandom } from '../rng';
-import { GameState, Item, Unit, isContainer, isDigger, isStation, isTank, isVehicle, isWash, itemById, onGround, tileAt, tileLevel } from '../state';
+import { GameState, Item, Unit, centerOf, isFixture, rectOf, isContainer, isDigger, isStation, isTank, isVehicle, isWash, itemById, onGround, tileAt, tileLevel } from '../state';
 
 export function clearQueue(s: GameState, u: Unit) {
   u.queue.length = 0; u.workLeft = 0; u.workTotal = 0; u.blocked = 0;
@@ -30,14 +31,21 @@ function fail(s: GameState, u: Unit, text: string) {
   clearQueue(s, u);
 }
 
+let cur: GameState;
 let speed = UNIT_SPEED; // set per unit at the top of runOrder: an excavator is slower, and stops with no fuel
 
-// Walk toward a point; true once there.
+// Walk toward a point, around anything in the way; true once there.
 function approach(u: Unit, tx: number, ty: number): boolean {
-  const dx = tx - u.x, dy = ty - u.y;
-  const d = Math.hypot(dx, dy), step = speed / TICKS_PER_SEC;
-  if (step <= 0) return d < 0.01;
-  if (d <= step) { u.x = tx; u.y = ty; return true; }
+  const step = speed / TICKS_PER_SEC;
+  if (step <= 0) return Math.hypot(tx - u.x, ty - u.y) < 0.01;
+  // Heading for a machine: pulling up beside it is as good as being there.
+  const gr = grid(cur), ti = Math.floor(ty) * cur.size + Math.floor(tx);
+  if (gr.grid[ti] === SOLID) { const it = itemById(cur, gr.ids[ti]); if (it && distToItem(it, u.x, u.y) <= 0.4) { u.nav = null; return true; } }
+  const w = waypoint(cur, u, tx, ty);
+  const dx = w.x - u.x, dy = w.y - u.y, d = Math.hypot(dx, dy);
+  const last = w.x === tx && w.y === ty;
+  if (!w.reached && d < 0.05) { u.blocked++; return false; }   // walled off: wait at the closest point
+  if (d <= step) { u.x = w.x; u.y = w.y; if (last) { u.nav = null; return true; } u.moving = true; return false; }
   u.x += (dx / d) * step; u.y += (dy / d) * step;
   u.moving = true;
   const sx = dx - dy; // screen-space x direction in the isometric view
@@ -49,6 +57,18 @@ function approach(u: Unit, tx: number, ty: number): boolean {
 function spot(u: Unit, tx: number, ty: number): [number, number] {
   const a = u.id * 2.4;
   return [tx + 0.5 + Math.cos(a) * 0.28, ty + 0.5 + Math.sin(a) * 0.28];
+}
+
+// Where to pull up beside a machine: `gap` tiles off the nearest edge of its footprint.
+function standoff(it: Item, u: Unit, gap: number): [number, number] {
+  const [x0, y0, x1, y1] = rectOf(it), [cx, cy] = centerOf(it);
+  const px = Math.max(x0, Math.min(x1 + 1, u.x)), py = Math.max(y0, Math.min(y1 + 1, u.y));
+  let dx = u.x - px, dy = u.y - py;
+  if (Math.hypot(dx, dy) < 0.01) { dx = u.x - cx; dy = u.y - cy; }
+  if (Math.abs(dx) < 0.01 && Math.abs(dy) < 0.01) { dx = 1; dy = 0; }
+  // Leave along one axis, so the machine pulls up square to the edge.
+  if (Math.abs(dx) >= Math.abs(dy)) return [dx > 0 ? x1 + 1 + gap : x0 - gap, Math.max(y0 + 0.5, Math.min(y1 + 0.5, u.y))];
+  return [Math.max(x0 + 0.5, Math.min(x1 + 0.5, u.x)), dy > 0 ? y1 + 1 + gap : y0 - gap];
 }
 
 function work(u: Unit, seconds: number): boolean {
@@ -70,8 +90,10 @@ export function runOrder(s: GameState, u: Unit) {
   if (!o) return;
   const carried = itemById(s, u.carrying);
   const veh = itemById(s, u.vehicle);
+  cur = s;
   // A dry excavator can only limp to a tank.
-  speed = veh ? (veh.fuel > 0 ? VEHICLES[veh.kind].speed : 0.5) : carried?.kind === 'atv' ? UNIT_SPEED * ATV_SPEED_BOOST : UNIT_SPEED;
+  speed = veh ? (veh.fuel > 0 ? VEHICLES[veh.kind].speed : 0.5) : carried?.kind === 'atv' ? UNIT_SPEED * ATV_SPEED_BOOST : UNIT_STATS[u.role].speed;
+  if (veh && veh.maxHp > 0 && veh.hp <= 0) { u.status = 'Machine wrecked'; u.blocked++; return; }
   if (veh && veh.fuel <= 0 && o.t !== 'refuel') { u.status = 'Out of diesel'; u.blocked++; return; }
   if (veh && o.t !== 'move' && o.t !== 'scoop' && o.t !== 'dump' && o.t !== 'refuel' && o.t !== 'rip' && o.t !== 'fuelup') return fail(s, u, 'Get out of the machine first');
   switch (o.t) {
@@ -93,15 +115,16 @@ export function runOrder(s: GameState, u: Unit) {
       // Moving a station sets any buckets sitting in it down where it stood.
       for (const slot of [it.inSlot, it.outSlot]) { const b = itemById(s, slot); if (b) { b.inStation = -1; b.x = it.x; b.y = it.y; } }
       it.inSlot = -1; it.outSlot = -1;
-      it.carriedBy = u.id; it.reservedBy = -1; u.carrying = it.id;
+      it.carriedBy = u.id; it.reservedBy = -1; u.carrying = it.id; dirty(s);
       return done(u);
     }
     case 'dropAt': {
       if (!carried) return done(u);
       u.status = 'Carrying ' + carried.kind;
       const [px, py] = spot(u, o.x, o.y);
+      if (isFixture(carried.kind) && !canPlace(s, carried.kind, o.x, o.y, carried.id)) return fail(s, u, 'Something is already there');
       if (!approach(u, px, py)) return;
-      carried.carriedBy = -1; carried.x = o.x; carried.y = o.y; u.carrying = -1;
+      carried.carriedBy = -1; carried.x = o.x; carried.y = o.y; u.carrying = -1; dirty(s);
       return done(u);
     }
     case 'testpan': {
@@ -256,8 +279,7 @@ export function runOrder(s: GameState, u: Unit) {
       if (!veh || !st || !(st.kind in HOPPER) || !onGround(st)) return fail(s, u, 'Nowhere to dump');
       if (veh.hopper <= 0) return done(u);
       u.status = st.kind === 'truck' ? 'Loading the truck' : 'Hauling to the ' + ITEM_LABEL[st.kind];
-      const dx = u.x - (st.x + 0.5), dy = u.y - (st.y + 0.5), d = Math.hypot(dx, dy) || 1;
-      if (d > 1.45 && !approach(u, st.x + 0.5 + dx / d * 1.3, st.y + 0.5 + dy / d * 1.3)) return;
+      if (distToItem(st, u.x, u.y) > 0.8 + 0.15 && !approach(u, ...standoff(st, u, 0.8))) return;
       const space = HOPPER[st.kind] - st.hopper, mixed = st.kind === 'truck' && st.hopper > 0 && st.ore !== veh.ore;
       if (space <= 0 || mixed || (space < veh.hopper && isDigger(veh.kind))) { u.blocked++; u.status = 'Waiting: no room to dump'; return; }
       u.status = 'Dumping';
@@ -274,8 +296,7 @@ export function runOrder(s: GameState, u: Unit) {
       const tank = itemById(s, o.tank);
       if (!veh || !tank || !isTank(tank.kind) || !onGround(tank)) return fail(s, u, 'No diesel tank');
       u.status = 'Driving to refuel';
-      const dx = u.x - (tank.x + 0.5), dy = u.y - (tank.y + 0.5), d = Math.hypot(dx, dy) || 1;
-      if (d > 1.45 && !approach(u, tank.x + 0.5 + dx / d * 1.3, tank.y + 0.5 + dy / d * 1.3)) return;
+      if (distToItem(tank, u.x, u.y) > 0.8 + 0.15 && !approach(u, ...standoff(tank, u, 0.8))) return;
       if (tank.fuel <= 0) return fail(s, u, 'The tank is empty');
       u.status = 'Refuelling';
       if (!work(u, EXCAVATOR.refuelSec)) return;
@@ -291,8 +312,7 @@ export function runOrder(s: GameState, u: Unit) {
       if (!veh || veh.kind !== 'fueltruck' || !target || !isVehicle(target.kind)) return done(u);
       if (veh.cargo <= 0 || target.fuel >= VEHICLES[target.kind].tank - 0.5) return done(u);
       u.status = 'Taking diesel out to a machine';
-      const dx = u.x - (target.x + 0.5), dy = u.y - (target.y + 0.5), d = Math.hypot(dx, dy) || 1;
-      if (d > 1.9 && !approach(u, target.x + 0.5 + dx / d * 1.5, target.y + 0.5 + dy / d * 1.5)) return;
+      if (distToItem(target, u.x, u.y) > 1.0 + 0.15 && !approach(u, ...standoff(target, u, 1.0))) return;
       u.status = 'Fuelling a machine';
       if (!work(u, 2)) return;
       const gal = Math.min(VEHICLES[target.kind].tank - target.fuel, veh.cargo);

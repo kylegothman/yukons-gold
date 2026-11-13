@@ -18,4 +18,5 @@ export type Command =
   | { c: 'fire'; p: number; unit: number }
   | { c: 'drive'; p: number; unit: number; item: number }
   | { c: 'dismount'; p: number; unit: number }
-  | { c: 'fuel'; p: number; item: number };
+  | { c: 'fuel'; p: number; item: number }
+  | { c: 'repair'; p: number; item: number };

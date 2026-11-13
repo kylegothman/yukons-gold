@@ -6,10 +6,11 @@
 // not a perfect one: it samples a little, stakes the best reading, and buys
 // each upgrade as soon as it can comfortably afford it.
 
-import { CLAIM_SIZE, SEASON_DAYS, STORE, TICKS_PER_DAY } from '../src/data/balance';
+import { CLAIM_SIZE, RAIDER, SEASON_DAYS, STORE, TICKS_PER_DAY, footprint } from '../src/data/balance';
+import { canPlace, freeSpot } from '../src/sim/systems/nav';
 import type { Command } from '../src/sim/commands';
 import { createGame } from '../src/sim/mapgen';
-import { GameState, Item, isContainer, isTank, isVehicle, itemById, onGround, tileAt, tileLevel } from '../src/sim/state';
+import { GameState, Item, rectOf, isContainer, isTank, isVehicle, itemById, onGround, tileAt, tileLevel } from '../src/sim/state';
 import { step } from '../src/sim/step';
 import { canClaim, dailyBurn, nextClaimCost } from '../src/sim/systems/economy';
 import { nearWater } from '../src/sim/systems/machines';
@@ -22,11 +23,12 @@ export interface Result { seed: number; cash: number; earned: number; busted: nu
 export function playSeason(seed: number, size = 128, verbose = false): Result {
   const s = createGame(seed, size), me = 0, pl = s.players[0], boss = s.units[0];
   const bx = Math.floor(boss.x), by = Math.floor(boss.y);
+  if (process.env.RAIDS === '0') s.raid.next = 1e12;   // the economy on its own, for comparison
   const days: Record<string, number> = {};
   const day = () => Math.floor(s.tick / TICKS_PER_DAY) + 1;
   const mark = (k: string) => { if (!(k in days)) { days[k] = day(); if (verbose) console.log(`  day ${day()}: ${k} (cash $${Math.round(pl.cash)})`); } };
   const mine = (kind: string) => s.items.filter(i => i.kind === kind && i.owner === me);
-  const hands = () => s.units.filter(u => !u.boss);
+  const hands = () => s.units.filter(u => u.owner === me && u.role === 'hand');
   let centre: [number, number] | null = null, round = 0, claimRing = 0;
   let plant: [number, number] | null = null;
 
@@ -39,17 +41,24 @@ export function playSeason(seed: number, size = 128, verbose = false): Result {
     }
     return [bx, by];
   };
-  const freeNear = (x0: number, y0: number, touch?: Item): [number, number] => {
-    for (let r = 1; r < 8; r++) for (let y = y0 - r; y <= y0 + r; y++) for (let x = x0 - r; x <= x0 + r; x++) {
-      const t = tileAt(s, x, y); if (!t || t.water || s.items.some(i => i.x === x && i.y === y)) continue;
-      if (touch && (Math.abs(x - touch.x) > 1 || Math.abs(y - touch.y) > 1)) continue;
-      return [x, y];
-    }
-    return [x0, y0];
+  // Orders wait in a list and go out one per decision, so each lands on ground that is still free.
+  const todo: { what: string; near?: [number, number]; touch?: string }[] = [];
+  const touchSpot = (what: string, t: Item): [number, number] | null => {
+    const [w, h] = footprint(what), [x0, y0, x1, y1] = rectOf(t);
+    for (let y = y0 - h; y <= y1 + 1; y++) for (let x = x0 - w; x <= x1 + 1; x++) if (canPlace(s, what, x, y)) return [x, y];
+    return null;
   };
+  const freeNear = (x0: number, y0: number, _touch?: Item): [number, number] => [x0, y0];
 
   function policy(cmds: Command[]) {
-    const buy = (what: string, at?: [number, number]) => { cmds.push({ c: 'buy', p: me, what, x: at?.[0], y: at?.[1] }); mark(what); };
+    const buy = (what: string, at?: [number, number], touch?: string) => { todo.push({ what, near: at, touch }); };
+    if (todo.length) {
+      const o = todo.shift()!, person = o.what === 'worker' || o.what === 'guard';
+      const t = o.touch ? mine(o.touch)[0] : undefined;
+      const at = person || o.what === 'drill' ? o.near : (t && touchSpot(o.what, t)) || freeSpot(s, o.what, o.near?.[0] ?? bx, o.near?.[1] ?? by);
+      cmds.push({ c: 'buy', p: me, what: o.what, x: at?.[0], y: at?.[1] }); mark(o.what);
+      return;
+    }
     // 1. Prospect: eight test pans in a spread west of camp, then stake the best reading.
     if (!centre) {
       // Sample in rounds of eight, walking outward along the creek, until something reads Rich or four rounds are done.
@@ -93,6 +102,19 @@ export function playSeason(seed: number, size = 128, verbose = false): Result {
     // 4. Shopping, cheapest step first.
     const onFoot = hands().filter(u => u.vehicle < 0).length, drivers = s.items.filter(i => isVehicle(i.kind) && i.owner === me).length;
     const has = (k: string) => mine(k).length > 0;
+    // Defenses: a few guards and a tower at camp before the first raid, more as the season goes on.
+    if (day() >= 6 && centre && s.raid.next < 1e11) {
+      const guards = s.units.filter(u => u.owner === me && u.role === 'guard').length, towers = mine('tower').length;
+      const rich = pl.earned > 7000, w = Math.floor(Math.log10(Math.max(1000, pl.earned) / 1000) * 2.5);
+      const wantG = rich ? Math.min(12, 1 + Math.floor(w * 0.8)) : 0, wantT = pl.earned > 30000 ? Math.min(4, Math.floor(w / 2)) : 0;
+      // Half the guards watch the camp, half the claim.
+      const gs = s.units.filter(u => u.owner === me && u.role === 'guard');
+      gs.forEach((g, i) => { const [px, py] = i % 2 ? [cx + 0.5, cy + 0.5 + (i % 4)] : [bx - 1.5, by - 1.5 + (i % 4)]; if (g.post && Math.hypot(g.post.x - px, g.post.y - py) > 3 && g.target < 0) cmds.push({ c: 'move', p: me, units: [g.id], x: px, y: py }); });
+      if (guards < wantG && spare > price('guard') + 1000) { buy('guard'); return; }
+      if (towers < wantT && spare > price('tower') + 1500) { buy('tower', towers % 2 ? [cx + 2, cy - 2 - towers] : [bx - 2 - towers * 2, by - 2]); return; }
+      if (!has('armory') && spare > price('armory') + 20000) { buy('armory', [bx - 4, by + 3]); return; }
+      for (const it of s.items) if (it.owner === me && it.maxHp > 0 && it.hp < it.maxHp * 0.5 && !s.units.some(u => u.owner === RAIDER)) { cmds.push({ c: 'repair', p: me, item: it.id }); }
+    }
     if (pl.tier === 1) {
       // Hire only once the ground has proved it pays.
       if (onFoot < 2 && pl.earned > 400 && spare > price('worker') + 400) { buy('worker'); buy('bucket', [bx, by]); return; }
@@ -103,7 +125,7 @@ export function playSeason(seed: number, size = 128, verbose = false): Result {
     if (!has('excavator') && !has('excavator2')) {
       if (spare > price('trommel') + price('tank') + price('excavator') + price('worker') + 500) {
         const sl = mine('sluice')[0];
-        buy('trommel', freeNear(sl.x, sl.y, sl)); buy('tank', freeNear(sl.x - 2, sl.y + 2)); buy('excavator', [cx, cy]); buy('worker');
+        buy('trommel', [sl.x, sl.y], 'sluice'); buy('tank', freeNear(sl.x - 2, sl.y + 2)); buy('excavator', [cx, cy]); buy('worker');
       }
       return;
     }
@@ -128,8 +150,7 @@ export function playSeason(seed: number, size = 128, verbose = false): Result {
     if (pl.tier >= 3 && !has('fueltruck') && has('truck') && spare > price('fueltruck') + price('worker') + 5000) { buy('fueltruck', [cx, cy - 1]); buy('worker'); return; }
     if (pl.tier === 4 && !has('excavator3') && spare > price('excavator3') + price('tank3') + price('worker') + 5000) { buy('excavator3', [cx + 1, cy + 1]); buy('tank3', freeNear(plant![0] - 3, plant![1] + 1)); buy('worker'); return; }
     if (pl.tier === 5 && !has('excavator4') && spare > price('excavator4') + price('crusher') + price('mill') + price('worker') + 10000) {
-      const wp = mine('washplant')[0], m = freeNear(wp.x, wp.y, wp);
-      buy('mill', m); buy('crusher', freeNear(m[0], m[1], { x: m[0], y: m[1] } as Item)); buy('excavator4', [cx - 1, cy - 1]); buy('worker');
+      buy('mill', undefined, 'washplant'); buy('crusher', undefined, 'mill'); buy('excavator4', [cx - 1, cy - 1]); buy('worker');
       return;
     }
     void drivers;
@@ -141,7 +162,7 @@ export function playSeason(seed: number, size = 128, verbose = false): Result {
     if (s.tick % 10 === 0) policy(cmds);
     step(s, cmds); s.events.length = 0;
   }
-  if (s.over === 'broke') busted = day();
+  if (s.over === 'broke' || s.over === 'dead') busted = day();
   const dug = [0, 0, 0, 0, 0];
   for (const t of s.tiles) if (t.owner === me && !t.water) { const k = tileLevel(t); for (let i = 0; i < k; i++) dug[i]++; }
   return { seed, cash: Math.round(pl.cash), earned: Math.round(pl.earned), busted, tier: pl.tier, days, dug, claims: pl.claims, hands: hands().length };

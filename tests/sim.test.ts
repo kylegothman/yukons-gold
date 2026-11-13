@@ -6,9 +6,13 @@ import { deserialize, serialize } from '../src/sim/save';
 import { step } from '../src/sim/step';
 import { dailyBurn, nextClaimCost } from '../src/sim/systems/economy';
 import { nearWater, wet } from '../src/sim/systems/machines';
+import { canPlace, findPath } from '../src/sim/systems/nav';
+import { newItem, newUnit } from '../src/sim/mapgen';
+import { RAID, RAIDER } from '../src/data/balance';
 
 // Most tests use the small map so they stay fast.
-const createGame = (seed: number, size = 64) => newGame(seed, size);
+// Raids are switched off unless a test turns them on.
+const createGame = (seed: number, size = 64) => { const s = newGame(seed, size); s.raid.next = 1e12; return s; };
 const run = (s: ReturnType<typeof createGame>, ticks: number, cmds: Command[] = []) => { step(s, cmds); for (let i = 1; i < ticks && !s.over; i++) step(s); };
 
 describe('map generation', () => {
@@ -208,7 +212,7 @@ describe('tier 2 machines', () => {
   function line(seed = 5) {
     const s = createGame(seed); s.players[0].cash = 50000;
     const boss = s.units[0], bx = Math.floor(boss.x), by = Math.floor(boss.y);
-    step(s, [{ c: 'buyClaim', p: 0, x0: bx - 7, y0: by - 4 }, { c: 'buy', p: 0, what: 'sluice', x: bx + 1, y: by + 1 }]);
+    step(s, [{ c: 'buyClaim', p: 0, x0: bx - 7, y0: by - 4 }, { c: 'buy', p: 0, what: 'sluice', x: bx + 1, y: by - 1 }]);
     step(s, [{ c: 'buy', p: 0, what: 'trommel', x: bx, y: by }, { c: 'buy', p: 0, what: 'tank', x: bx - 1, y: by + 1 },
       { c: 'buy', p: 0, what: 'excavator', x: bx - 2, y: by }, { c: 'buy', p: 0, what: 'worker' }]);
     const hand = s.units.find(u => !u.boss)!, ex = s.items.find(i => i.kind === 'excavator')!;
@@ -267,7 +271,7 @@ describe('tier 2 machines', () => {
     const sl = s.items.find(i => i.kind === 'sluice')!;
     step(s); expect(wet(s, sl.x, sl.y, 0)).toBe(false);
     let px = bx; while (!nearWater(s, px, by)) px++;   // the first dry tile that touches the creek
-    step(s, [{ c: 'buy', p: 0, what: 'pump', x: px, y: by }, { c: 'buy', p: 0, what: 'tank', x: bx - 1, y: by }]);
+    step(s, [{ c: 'buy', p: 0, what: 'pump', x: px, y: by }, { c: 'buy', p: 0, what: 'tank', x: bx - 1, y: by - 1 }]);
     run(s, 5); expect(wet(s, sl.x, sl.y, 0)).toBe(true);
     s.items.find(i => i.kind === 'tank')!.fuel = 0;
     run(s, 5); expect(wet(s, sl.x, sl.y, 0)).toBe(false);
@@ -292,11 +296,13 @@ describe('tiers 3 to 5', () => {
     const s = createGame(5); s.players[0].cash = 5e6; s.players[0].tier = 5;
     const boss = s.units[0], bx = Math.floor(boss.x), by = Math.floor(boss.y);
     step(s, [{ c: 'buyClaim', p: 0, x0: bx - 8, y0: by - 8 }, { c: 'buyClaim', p: 0, x0: bx - 16, y0: by - 8 }, { c: 'buyClaim', p: 0, x0: bx - 8, y0: by }, { c: 'buyClaim', p: 0, x0: bx - 16, y0: by }]);
-    step(s, [{ c: 'buy', p: 0, what: 'washplant', x: bx + 1, y: by + 1 }, { c: 'buy', p: 0, what: 'tank3', x: bx - 1, y: by + 2 },
-      { c: 'buy', p: 0, what: 'mill', x: bx, y: by + 1 }, { c: 'buy', p: 0, what: 'crusher', x: bx - 1, y: by + 1 }]);
+    s.items = s.items.filter(i => i.kind !== 'sieve' && i.kind !== 'pan');   // the big plant goes where the hand gear stood
+    step(s, [{ c: 'buy', p: 0, what: 'washplant', x: bx - 1, y: by + 1 }, { c: 'buy', p: 0, what: 'tank3', x: bx - 1, y: by + 3 },
+      { c: 'buy', p: 0, what: 'mill', x: bx - 3, y: by + 1 }, { c: 'buy', p: 0, what: 'crusher', x: bx - 5, y: by + 1 }]);
+    expect(s.items.filter(i => ['washplant', 'tank3', 'mill', 'crusher'].includes(i.kind)).length).toBe(4);
     const drivers: number[] = [];
     kinds.forEach((k, i) => {
-      step(s, [{ c: 'buy', p: 0, what: k, x: bx - 2 - i, y: by - 1 }, { c: 'buy', p: 0, what: 'worker' }]);
+      step(s, [{ c: 'buy', p: 0, what: k, x: bx - 3 - 4 * i, y: by - 4 }, { c: 'buy', p: 0, what: 'worker' }]);
       const hand = s.units[s.units.length - 1], veh = s.items[s.items.length - 1];
       run(s, 60, [{ c: 'drive', p: 0, unit: hand.id, item: veh.id }]);
       expect(hand.vehicle).toBe(veh.id);
@@ -356,5 +362,86 @@ describe('tiers 3 to 5', () => {
     run(s, 200, [{ c: 'drop', p: 0, unit: boss.id }, { c: 'testpan', p: 0, unit: boss.id, tx: bx - 4, ty: by, deep: true }]);
     expect(s.tiles[by * s.size + bx - 4].drilled).toBe(true);
     expect(cash - s.players[0].cash).toBeGreaterThan(99);
+  });
+});
+
+describe('footprints and pathfinding', () => {
+  const open = (seed = 5) => { const s = createGame(seed); s.players[0].cash = 5e6; s.players[0].tier = 5; const b = s.units[0]; return { s, boss: b, bx: Math.floor(b.x), by: Math.floor(b.y) }; };
+  it('nothing can be placed on an occupied square, and big machines cover several', () => {
+    const { s, bx, by } = open();
+    step(s, [{ c: 'buy', p: 0, what: 'washplant', x: bx - 8, y: by - 6 }]);
+    const wp = s.items.find(i => i.kind === 'washplant')!;
+    expect(wp).toBeTruthy();
+    const cash = s.players[0].cash;
+    for (const [dx, dy] of [[0, 0], [2, 1], [1, 0]]) step(s, [{ c: 'buy', p: 0, what: 'tank', x: wp.x + dx, y: wp.y + dy }]);
+    expect(s.items.some(i => i.kind === 'tank')).toBe(false);
+    expect(s.players[0].cash).toBeGreaterThan(cash - 10);         // refused orders cost nothing
+    expect(canPlace(s, 'tank', wp.x + 3, wp.y)).toBe(true);       // right beside it is fine
+    expect(canPlace(s, 'crusher', wp.x - 1, wp.y)).toBe(false);   // a 2 x 2 that would overlap
+  });
+  it('a walker goes around a wall of machines instead of through it', () => {
+    const { s, boss, bx, by } = open();
+    s.items.length = 0;
+    for (let dy = -3; dy <= 3; dy++) newItem(s, 'tank', 0, bx - 4, by + dy);
+    const wall = new Set(s.items.map(i => i.y * s.size + i.x));
+    const { path, reached } = findPath(s, bx, by, bx - 8, by, false);
+    expect(reached).toBe(true);
+    expect(path.some(i => wall.has(i))).toBe(false);
+    step(s, [{ c: 'move', p: 0, units: [boss.id], x: bx - 8 + 0.5, y: by + 0.5 }]);
+    for (let i = 0; i < 200 && boss.queue.length; i++) { step(s); expect(wall.has(Math.floor(boss.y) * s.size + Math.floor(boss.x))).toBe(false); }
+    expect(Math.hypot(boss.x - (bx - 7.5), boss.y - (by + 0.5))).toBeLessThan(0.1);
+  });
+});
+
+describe('raids and defenses', () => {
+  const camp = (seed = 5) => { const s = newGame(seed, 64); s.players[0].cash = 50000; const b = s.units[0]; return { s, boss: b, bx: Math.floor(b.x), by: Math.floor(b.y) }; };
+  it('the first raid arrives after day 9: sneak thieves for a poor camp, a war party for a rich one', () => {
+    const { s } = camp(); s.players[0].cash = 2000;
+    run(s, RAID.firstDay * TICKS_PER_DAY - 5);
+    expect(s.units.some(u => u.owner === RAIDER)).toBe(false);
+    let stolen = 0, bandits = 0;
+    for (let i = 0; i < 3 * TICKS_PER_DAY; i++) { step(s); stolen += s.events.filter(e => e.type === 'steal').length; bandits += s.units.filter(u => u.role === 'bandit').length; s.events.length = 0; }
+    expect(stolen).toBeGreaterThan(0); expect(bandits).toBe(0); expect(s.over).toBe('');
+    const rich = camp().s; rich.players[0].earned = 2e6;
+    run(rich, (RAID.firstDay + 4) * TICKS_PER_DAY);
+    expect(rich.over).toBe('dead');                       // nobody guarding the boss
+  });
+  it('guards and a tower see a raid off', () => {
+    const { s, bx, by } = camp(); s.players[0].earned = 200000;
+    step(s, [{ c: 'buy', p: 0, what: 'tower', x: bx - 2, y: by - 2 }, { c: 'buy', p: 0, what: 'guard' }, { c: 'buy', p: 0, what: 'guard' }, { c: 'buy', p: 0, what: 'guard' }]);
+    expect(s.units.filter(u => u.role === 'guard').length).toBe(3);
+    let saw = false, deaths = 0;
+    for (let i = 0; i < 12 * TICKS_PER_DAY && !s.over; i++) { step(s); if (s.units.some(u => u.owner === RAIDER)) saw = true; deaths += s.events.filter(e => e.type === 'death' && e.owner === RAIDER).length; s.events.length = 0; }
+    console.log('defended raid: raiders down', deaths, 'over', JSON.stringify(s.over), 'cash', Math.round(s.players[0].cash));
+    expect(saw).toBe(true); expect(deaths).toBeGreaterThan(1); expect(s.over).toBe('');
+  });
+  it('a thief takes cash and gives it back if stopped', () => {
+    const { s, bx, by } = camp(); s.raid.next = 1e12;
+    const thief = newUnit(s, RAIDER, bx - 10.5, by + 0.5, false, 'thief');
+    const before = s.players[0].cash;
+    for (let i = 0; i < 300 && thief.loot === 0; i++) step(s);
+    expect(thief.loot).toBeGreaterThan(100);
+    expect(s.players[0].cash).toBeLessThan(before - 100);
+    const mid = s.players[0].cash;
+    newItem(s, 'tower', 0, Math.floor(thief.x) - 2, Math.floor(thief.y));
+    run(s, 100);
+    expect(s.units.includes(thief)).toBe(false);
+    expect(s.players[0].cash).toBeGreaterThan(mid + 100);
+  });
+  it('a fence keeps bandits out until they break it, and a wrecked machine can be repaired', () => {
+    const { s, boss, bx, by } = camp(); s.raid.next = 1e12; s.items.length = 0;
+    const cx = bx - 6; boss.x = cx + 0.5;   // camp moved clear of the creek so the ring closes
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) if (Math.max(Math.abs(dx), Math.abs(dy)) === 2) newItem(s, 'chainfence', 0, cx + dx, by + dy);
+    const fences = s.items.length;
+    const bandit = newUnit(s, RAIDER, cx - 8.5, by + 0.5, false, 'bandit');
+    expect(findPath(s, cx - 8, by, cx, by, true).reached).toBe(false);   // walled out
+    expect(findPath(s, cx - 8, by, cx, by, false).reached).toBe(true);   // the crew uses the gates
+    run(s, 150); expect(boss.hp).toBe(boss.maxHp);
+    run(s, 600); expect(s.items.length).toBeLessThan(fences);            // through the fence eventually
+    s.units.splice(s.units.indexOf(bandit), 1);
+    const tank = newItem(s, 'tank', 0, bx - 6, by - 6); tank.hp = 0;
+    const cash = s.players[0].cash;
+    step(s, [{ c: 'repair', p: 0, item: tank.id }]);
+    expect(tank.hp).toBe(tank.maxHp); expect(s.players[0].cash).toBeLessThan(cash);
   });
 });

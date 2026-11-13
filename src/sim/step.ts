@@ -1,9 +1,11 @@
 import type { Command } from './commands';
-import { GameState, isContainer, isStation, isVehicle, isWash, itemById, onGround, tileAt, unitById } from './state';
-import { buy, buyClaim, dismount, fillTank, fire, sell, tickEconomy } from './systems/economy';
+import { GameState, isRaider, isContainer, isStation, isVehicle, isWash, itemById, onGround, tileAt, unitById } from './state';
+import { buy, buyClaim, dismount, fillTank, fire, repair, sell, tickEconomy } from './systems/economy';
 import { tickMachines } from './systems/machines';
 import { operatorOf, planWorker } from './systems/jobs';
 import { clearQueue, dropCarried, runOrder } from './systems/orders';
+import { bossDefends, planGuard, planRaider, tickCombat } from './systems/combat';
+import { freeTile, standable } from './systems/nav';
 
 function toast(s: GameState, p: number, text: string) { s.events.push({ type: 'toast', owner: p, text }); }
 
@@ -17,10 +19,13 @@ function apply(s: GameState, cmd: Command) {
     case 'move':
       cmd.units.forEach((id, i) => {
         const u = own(id); if (!u) return;
-        clearQueue(s, u); u.job = null;
-        const a = i * 2.4, r = cmd.units.length > 1 ? 0.35 * Math.sqrt(i) : 0;
-        const x = Math.max(0.1, Math.min(s.size - 0.1, cmd.x + Math.cos(a) * r));
-        const y = Math.max(0.1, Math.min(s.size - 0.1, cmd.y + Math.sin(a) * r));
+        clearQueue(s, u); u.job = null; u.target = -1;
+        const a = i * 2.4, r = cmd.units.length > 1 ? 0.45 * Math.sqrt(i) : 0;
+        let x = Math.max(0.1, Math.min(s.size - 0.1, cmd.x + Math.cos(a) * r));
+        let y = Math.max(0.1, Math.min(s.size - 0.1, cmd.y + Math.sin(a) * r));
+        // Nobody stands on top of a machine: aim for the nearest open tile instead.
+        if (!standable(s, Math.floor(x), Math.floor(y))) { const [fx, fy] = freeTile(s, Math.floor(x), Math.floor(y)); x = fx + 0.5; y = fy + 0.5; }
+        if (u.role === 'guard') u.post = { x, y };
         u.queue.push({ t: 'move', x, y });
       });
       return;
@@ -71,7 +76,7 @@ function apply(s: GameState, cmd: Command) {
     }
     case 'job':
       for (const id of cmd.units) {
-        const u = own(id); if (!u || u.boss) continue;
+        const u = own(id); if (!u || u.boss || u.role === 'guard') continue;
         if (u.vehicle >= 0 && cmd.job && cmd.job.type !== 'dig') { toast(s, cmd.p, 'Get out of the machine first'); continue; }
         clearQueue(s, u);
         u.job = cmd.job ? { ...cmd.job } : null;
@@ -99,6 +104,7 @@ function apply(s: GameState, cmd: Command) {
     }
     case 'dismount': { if (own(cmd.unit)) dismount(s, cmd.unit); return; }
     case 'fuel': fillTank(s, cmd.p, cmd.item); return;
+    case 'repair': repair(s, cmd.p, cmd.item); return;
   }
 }
 
@@ -106,8 +112,12 @@ function apply(s: GameState, cmd: Command) {
 export function step(s: GameState, commands: Command[] = []) {
   if (s.over) return;
   for (const c of commands) apply(s, c);
-  for (const u of s.units) {
+  for (const u of [...s.units]) {   // a copy: units can fall mid-loop
+    if (u.hp <= 0) continue;
     u.moving = false;
+    if (isRaider(u)) { planRaider(s, u); if (u.hp > 0 && u.queue.length) runOrder(s, u); continue; }
+    if (u.role === 'guard') { planGuard(s, u); if (u.queue.length) runOrder(s, u); continue; }
+    if (u.boss) bossDefends(s, u);
     if (u.queue.length === 0) {
       if (u.boss) u.status = u.carrying >= 0 ? 'Carrying' : 'Idle';
       else planWorker(s, u);
@@ -117,6 +127,7 @@ export function step(s: GameState, commands: Command[] = []) {
     if (!u.boss && u.blocked > 40) clearQueue(s, u);
   }
   tickMachines(s);
+  tickCombat(s);
   s.tick++;
   tickEconomy(s);
 }
