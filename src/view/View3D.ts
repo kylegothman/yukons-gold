@@ -18,6 +18,7 @@ import type { Session } from './session';
 import { Terrain, WATER_Y } from './terrain';
 
 const smooth = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+const POUR = 0.3; // share of a sieve job spent tipping the bucket in
 const DAY_SHARE = 0.72; // part of each day the sun is up
 export const DAWN_OFFSET = 0.06;
 
@@ -745,15 +746,16 @@ export class View3D {
         v.lastC = c;
       } else if (working && (o?.t === 'testpan' || (o?.t === 'operate' && stKind === 'pan'))) {
         // Down on the haunches, swirling the pan.
-        tool = 'pan'; lL = lR = -1.35; kL = kR = 1.9; drop = 0.22; aL = aR = -0.85; eL = eR = -0.55; zIn = 0.3; lean = 0.42;
+        // A test pan comes off the belt; at the wash station they pick up the pan that is lying there.
+        tool = o?.t === 'testpan' ? 'pan' : ''; lL = lR = -1.35; kL = kR = 1.9; drop = 0.22; aL = aR = -0.85; eL = eR = -0.55; zIn = 0.3; lean = 0.42;
         P.tools.pan.position.set(Math.sin(t * 7 + u.id) * 0.04, 0.02, 0.3 + Math.cos(t * 7 + u.id) * 0.035); P.tools.pan.rotation.set(Math.cos(t * 7 + u.id) * 0.22, 0, Math.sin(t * 7 + u.id) * 0.22);
       } else if (working && o?.t === 'operate' && stKind === 'sieve') {
-        // Rocking the sieve box side to side.
-        aL = aR = -1.15; eL = eR = -0.45; zIn = 0.15; lean = 0.22; twist = Math.sin(t * 9 + u.id) * 0.28; kL = kR = 0.2; lL = lR = -0.1;
+        // Tip the bucket onto the screen, then rock the sieve box side to side.
+        if (1 - u.workLeft / u.workTotal < POUR) { aL = aR = -1.2; eL = eR = -0.55; zIn = 0.28; lean = 0.2; }
+        else { aL = aR = -1.15; eL = eR = -0.45; zIn = 0.15; lean = 0.22; twist = Math.sin(t * 9 + u.id) * 0.28; kL = kR = 0.2; lL = lR = -0.1; }
       } else if (working && o?.t === 'operate') {
-        // Feeding the sluice a shovelful at a time.
-        const c = (t * 0.9 + u.id * 0.3) % 1, e = Math.sin(c * Math.PI);
-        tool = 'shovel'; zIn = 0.3; aL = aR = -0.6 - e * 0.7; eL = eR = -0.3 - e * 0.3; lean = 0.35 - e * 0.2; twist = e * 0.5;
+        // Pouring the bucket slowly into the head of the sluice.
+        aL = aR = -1.15 + Math.sin(t * 3 + u.id) * 0.06; eL = eR = -0.55; zIn = 0.28; lean = 0.24;
       } else if (working) { aL = aR = -1.05 + Math.sin(t * 9 + u.id) * 0.2; eL = eR = -0.5; lean = 0.25; }
       else if (carrying) { aL = aR = -0.85; eL = eR = -0.75; zIn = 0.12; }
       if (u.role === 'guard') {
@@ -827,7 +829,9 @@ export class View3D {
         if (it.running) g.position.y += Math.sin(t * 30 + it.id) * (working ? 0.012 : 0.005);
       } else if (carrier) {
         const c = carrier.m.group, fx = Math.sin(carrier.yaw), fz = Math.cos(carrier.yaw);
-        if (it.kind === 'barrow') { g.position.set(c.position.x + fx * 0.5, c.position.y, c.position.z + fz * 0.5); g.rotation.set(-0.12, carrier.yaw, 0); }
+        const cu0 = unitById(s, it.carriedBy), busy = !!cu0 && cu0.workTotal > 0;
+        if (it.kind === 'barrow' && busy) { const bx = c.position.x - fz * 0.75 - fx * 0.1, bz = c.position.z + fx * 0.75 - fz * 0.1; g.position.set(bx, this.itemGround(bx, bz), bz); g.rotation.set(0, carrier.yaw + 0.5, 0); }   // parked clear of the swing
+        else if (it.kind === 'barrow') { g.position.set(c.position.x + fx * 0.5, c.position.y, c.position.z + fz * 0.5); g.rotation.set(-0.12, carrier.yaw, 0); }
         else if (it.kind === 'atv') { g.position.copy(c.position); g.rotation.set(0, carrier.yaw, 0); c.position.y += 0.16; }   // the hand rides it
         else if (isFixture(it.kind)) { g.position.set(c.position.x, c.position.y + 1.05, c.position.z); g.rotation.set(0, carrier.yaw, 0); }
         else {
@@ -839,12 +843,23 @@ export class View3D {
         }
       } else if (st) {
         const side = st.inSlot === it.id ? -1 : 1, x = st.x + 0.5 + side * 0.4, z = st.y + 0.5 + 0.28;
-        g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, 0, 0);
+        const op = st.inSlot === it.id ? this.operating(st) : undefined, uv = op && this.units.get(op.id);
+        const prog = op ? 1 - op.workLeft / op.workTotal : 0;
+        if (op && uv && (st.kind === 'sluice' || (st.kind === 'sieve' && prog < POUR))) {
+          // held out over the station and tipped further as it empties
+          const c = uv.m.group.position, fx = Math.sin(uv.yaw), fz = Math.cos(uv.yaw), tip = 0.7 + 1.1 * (st.kind === 'sieve' ? prog / POUR : prog);
+          g.position.set(c.x + fx * 0.36, c.y + 0.6, c.z + fz * 0.36); g.rotation.set(tip, uv.yaw, 0);
+          if (Math.random() < 0.25) this.burst(c.x + fx * 0.5, c.y + 0.5, c.z + fz * 0.5, 1, 0x8a6a45, 0.15, 0.1);
+        } else { g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, 0, 0); }
       } else {
         const stn = isFixture(it.kind), [cx, cz] = centerOf(it), x = cx + (stn ? 0 : ((it.id * 37) % 5 - 2) * 0.13), z = cz + (stn ? 0 : ((it.id * 53) % 5 - 2) * 0.13);
         // A fence panel turns to line up with its neighbours.
         const turn = isFence(it.kind) && !fences.has((it.y) * s.size + it.x - 1) && !fences.has(it.y * s.size + it.x + 1) && (fences.has((it.y - 1) * s.size + it.x) || fences.has((it.y + 1) * s.size + it.x));
-        g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, stn ? (turn ? Math.PI / 2 : 0) : it.id * 1.7, 0);
+        const op = it.kind === 'pan' ? this.operating(it) : undefined, uv = op && this.units.get(op.id);
+        if (op && uv) {
+          const c = uv.m.group.position, fx = Math.sin(uv.yaw), fz = Math.cos(uv.yaw), w = this.uTime.value * 7 + op.id;
+          g.position.set(c.x + fx * 0.32 + Math.sin(w) * 0.04, c.y + 0.4, c.z + fz * 0.32 + Math.cos(w) * 0.04); g.rotation.set(Math.cos(w) * 0.25, uv.yaw, Math.sin(w) * 0.25);
+        } else { g.position.set(x, this.itemGround(x, z), z); g.rotation.set(0, stn ? (turn ? Math.PI / 2 : 0) : it.id * 1.7, 0); }
       }
       if (isProcessor(it.kind)) {
         const drum = g.getObjectByName('drum'), deck = g.getObjectByName('deck'), load = g.getObjectByName('load');
@@ -875,6 +890,9 @@ export class View3D {
     }
     for (const [id, g] of this.items) if (!s.items.some(i => i.id === id)) { this.world.remove(g); this.items.delete(id); this.itemGlows.delete(id); this.notes.get(id)?.remove(); this.notes.delete(id); this.itemHp.get(id)?.remove(); this.itemHp.delete(id); if (ses.selItem === id) ses.selItem = -1; }
   }
+
+  /** Whoever is hands-on at this station right now. */
+  operating(st: Item): Unit | undefined { return this.ses.state.units.find(u => u.workTotal > 0 && u.queue[0]?.t === 'operate' && (u.queue[0] as { station: number }).station === st.id); }
 
   /** Hoses from each running pump to the pans and sluices it waters. */
   updateMachines() {

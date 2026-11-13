@@ -4,7 +4,6 @@ import {
 } from '../data/balance';
 import { layerGrade, organicGrade } from '../sim/mapgen';
 import { Unit, isContainer, isDefense, isProcessor, isRaider, isTank, isVehicle, isWash, itemById, onGround, tileAt, tileLevel } from '../sim/state';
-import { daysToRaid } from '../sim/systems/combat';
 import { dailyBurn, nextClaimCost, repairCost } from '../sim/systems/economy';
 import { canDigLayer, linkedSluice, wet } from '../sim/systems/machines';
 import { ITEM_NAME } from './actions';
@@ -32,7 +31,7 @@ export class Hud {
         <div class="stat"><label>Burn</label><b id="burn" class="neg"></b><small id="burnsub">living + wages + upkeep</small></div>
         <div class="stat"><label>Gold recovered</label><b id="gold" class="goldc"></b><small id="goldsub"></small></div>
         <div class="dial" title="Time of day"><div id="dialarm"><i class="sun"></i><i class="moon"></i></div></div>
-        <div class="stat" id="s-raid"><label>Raiders</label><b id="raid"></b><small id="raidsub"></small></div>
+        <div class="stat" id="s-raid"><label>Camp</label><b id="raid"></b><small id="raidsub"></small></div>
         <div class="stat wide"><label id="daylabel">Day 1</label><div class="track"><i id="daybar"></i></div><small id="daysub"></small></div>
         <div class="speed" id="speed">
           <button data-s="0" title="Pause (Space)">❚❚</button><button data-s="1" title="1">1x</button><button data-s="2" title="2">2x</button><button data-s="4" title="3">4x</button><button id="mute" title="Sound on or off">♪</button>
@@ -162,7 +161,7 @@ export class Hud {
       <tr><td>WASD / arrows</td><td>Move the camera (two-finger scroll and middle-drag also work)</td></tr>
       <tr><td>Scroll wheel, pinch, + / -</td><td>Zoom</td></tr>
       <tr><td>Space, 1, 2, 3</td><td>Pause, 1x, 2x, 4x speed</td></tr></table>
-      <h3>Raiders</h3><p>From day 9 thieves and bandits come for the camp, more of them the richer you are. Thieves take cash and run for the map edge: stop them and you get it back. Bandits wreck machines and go for the crew. Buy guards, towers and fences under Defense in the store. If Yukon falls, the season is over.</p><h3>Going deeper</h3><p>The ground has five layers. Each needs bigger gear: a mini excavator for topsoil; a dozer to rip the brown layer and a mid excavator to dig it; a large excavator for the blue layer; a mining excavator, crusher and mill for bedrock, the richest of all. A tile can only go one layer deeper than the tiles around it, so deep pits need to be wide. Buy the drill rig and press <kbd>R</kbd> to read every layer of a tile before you commit.</p><h3>Machines</h3><p>Buying a sluice box unlocks them. Set a <b>trommel</b> on a tile touching a sluice and a <b>diesel tank</b> within 8 tiles. Right-click a hired hand onto the <b>excavator</b>, then right-click your claim. It digs, dumps into the trommel, and the trommel feeds the sluice. Topsoil can only be dug once the organic layer is off the four tiles around it.</p><h3>Hired hands</h3><p>Select a hand and right-click your claim. They <b>mine on their own</b>: dig, screen, wash, repeat. Add more hands the same way.</p><p>Optional: right-click a hand onto the sieve or pan to <b>staff it full time</b>. Everyone else, you included, then just drops buckets there and walks off.</p>
+      <h3>Raiders</h3><p>Sooner or later thieves and bandits come for the camp, without warning, and more of them the richer you are. Thieves take cash and run for the map edge: stop them and you get it back. Bandits wreck machines and go for the crew. Buy guards, towers and fences under Defense in the store. If Yukon falls, the season is over.</p><h3>Going deeper</h3><p>The ground has five layers. Each needs bigger gear: a mini excavator for topsoil; a dozer to rip the brown layer and a mid excavator to dig it; a large excavator for the blue layer; a mining excavator, crusher and mill for bedrock, the richest of all. A tile can only go one layer deeper than the tiles around it, so deep pits need to be wide. Buy the drill rig and press <kbd>R</kbd> to read every layer of a tile before you commit.</p><h3>Machines</h3><p>Buying a sluice box unlocks them. Set a <b>trommel</b> on a tile touching a sluice and a <b>diesel tank</b> within 8 tiles. Right-click a hired hand onto the <b>excavator</b>, then right-click your claim. It digs, dumps into the trommel, and the trommel feeds the sluice. Topsoil can only be dug once the organic layer is off the four tiles around it.</p><h3>Hired hands</h3><p>Select a hand and right-click your claim. They <b>mine on their own</b>: dig, screen, wash, repeat. Add more hands the same way.</p><p>Optional: right-click a hand onto the sieve or pan to <b>staff it full time</b>. Everyone else, you included, then just drops buckets there and walks off.</p>
       </div></div><button class="primary" data-close>Got it</button></div>`;
   }
 
@@ -174,7 +173,7 @@ export class Hud {
     const key = ['', 'a sluice box', 'a mini excavator', 'a mid excavator', 'a large excavator'];
     el('modal').innerHTML = `<div class="sheet panel wide"><h2>Supply store</h2><p class="sub">Pick gear, then click the spot where you want it delivered. Gear sells back at ${SELL_BACK * 100}%. Diesel is ${$(DIESEL_PRICE)} a gallon.</p>
       ${[1, 2, 3, 4, 5].map(t => `<h3>Tier ${t}: ${TIER_NAMES[t]} ${t > pl.tier ? `<small class="lk">locked: buy ${key[t - 1]} first</small>` : ''}</h3><div class="cards">${STORE.filter(e => e.tier === t && !e.defense).map(card).join('')}</div>`).join('')}
-      <h3>Defense <small class="lk" style="color:var(--gold)">raiders turn up from day 9, and more of them the richer you get</small></h3><div class="cards">${STORE.filter(e => e.defense).map(card).join('')}</div>
+      <h3>Defense <small class="lk" style="color:var(--gold)">raiders come without warning, and more of them the richer you get</small></h3><div class="cards">${STORE.filter(e => e.defense).map(card).join('')}</div>
       <button class="primary" data-close>Close</button></div>`;
   }
 
@@ -255,9 +254,9 @@ export class Hud {
     const secs = runway * 60 / (ses.paused ? 1 : ses.speed);
     el('warn').textContent = ses.started && !s.over && runway < 1.5 ? `Broke in ${Math.ceil(secs)} seconds` : '';
     if (this.modal === 'store') el('modal').querySelectorAll<HTMLElement>('.card').forEach(c => c.classList.toggle('poor', p.cash < Number(c.dataset.price)));
-    const raiders = s.units.filter(isRaider).length, toRaid = daysToRaid(s);
-    el('s-raid').classList.toggle('danger', raiders > 0 || s.raid.spawnAt >= 0);
-    el('raid').textContent = raiders ? `${raiders} in camp!` : s.raid.spawnAt >= 0 ? 'Incoming!' : toRaid > 50 ? 'None' : `in ${toRaid < 1 ? Math.ceil(toRaid * 60) + ' sec' : toRaid.toFixed(1) + ' days'}`;
+    const raiders = s.units.filter(isRaider).length;
+    el('s-raid').classList.toggle('danger', raiders > 0);
+    el('raid').textContent = raiders ? `${raiders} in camp!` : 'All quiet';   // no countdown: raids come without warning
     const gd = s.units.filter(u => u.owner === ses.me && u.role === 'guard').length, tw = s.items.filter(i => i.kind === 'tower' && i.owner === ses.me).length;
     el('raidsub').textContent = `${gd} guard${gd === 1 ? '' : 's'}, ${tw} tower${tw === 1 ? '' : 's'}`;
     this.renderCrew();

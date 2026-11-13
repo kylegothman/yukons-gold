@@ -49,7 +49,7 @@ function schedule(s: GameState) {
     r.spawnAt = s.tick + secs(RAID.warnSec);
     const dx = r.fromX - x, dy = r.fromY - y;
     const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'east' : 'west') : (dy > 0 ? 'south' : 'north');
-    s.events.push({ type: 'raid', owner: 0, x: r.fromX, y: r.fromY, text: `Raiders coming from the ${dir}!` });
+    s.events.push({ type: 'raid', owner: 0, x: r.fromX, y: r.fromY, text: `Raiders! They are coming in from the ${dir}` });
   }
   if (r.spawnAt >= 0 && s.tick >= r.spawnAt) {
     // Raids grow with the season and with how much there is to take. A camp that is

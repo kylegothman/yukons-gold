@@ -74,7 +74,7 @@ export const footprint = (kind: string): [number, number] => FOOTPRINT[kind] ?? 
 
 // Raids. Bandits wreck gear and go for the crew; thieves grab cash and run for the map edge.
 export const RAIDER = 99; // owner id of every bandit and thief
-export const RAID = { firstDay: 9, minGapDays: 4, maxGapDays: 6, warnSec: 20, startSize: 2, growEveryDays: 15, maxSize: 12, edgeDist: 26, poorBelow: 10000 };
+export const RAID = { firstDay: 8, firstSpreadDays: 2, minGapDays: 4, maxGapDays: 6, warnSec: 0, startSize: 2, growEveryDays: 15, maxSize: 12, edgeDist: 26, poorBelow: 10000 };
 export const UNIT_STATS: Record<string, { hp: number; dmg: number; range: number; coolSec: number; speed: number }> = {
   boss: { hp: 220, dmg: 8, range: 1.3, coolSec: 1, speed: 3.2 },
   hand: { hp: 70, dmg: 0, range: 0, coolSec: 1, speed: 3.2 },

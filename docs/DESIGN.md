@@ -173,7 +173,7 @@ Every piece of gear covers a footprint in tiles, sized roughly true to life at 1
 
 ### Raids
 
-The first raid comes on day 9, then every 4 to 6 days. Raid size grows with the season and, more steeply, with how much gold has been sold, so a camp that is scraping by sees a sneak thief or two and a rich one sees a war party (capped at 12).
+The first raid comes somewhere between day 8 and day 10, then every 4 to 6 days. Nothing on screen counts down to one: the player hears about a raid when the raiders walk onto the map. Raid size grows with the season and, more steeply, with how much gold has been sold, so a camp that is scraping by sees a sneak thief or two and a rich one sees a war party (capped at 12).
 
 - Thieves walk to camp, take 5% of the cash and run for the map edge. Stop one and the cash comes back.
 - Bandits only show up once $10,000 of gold has been sold. They attack anyone within reach, then wreck the nearest machine.

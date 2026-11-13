@@ -66,7 +66,7 @@ export function createGame(seed: number, size = MAP_SIZE): GameState {
     seed, rng: seed | 0, tick: 0, size, tiles, units: [], items: [],
     players: [{ id: 0, cash: START_CASH, goldGrams: 0, earned: 0, claims: 0, tilesDug: 0, loadsWashed: 0, samples: 0, tier: 1, drill: false }],
     nextId: 1, over: '', events: [], spawn: { x: 0, y: 0 },
-    raid: { next: RAID.firstDay * TICKS_PER_DAY, spawnAt: -1, wave: 0, fromX: 0, fromY: 0 },
+    raid: { next: Math.round((RAID.firstDay + ((Math.abs(seed) * 9301 + 49297) % 233280) / 233280 * RAID.firstSpreadDays) * TICKS_PER_DAY), spawnAt: -1, wave: 0, fromX: 0, fromY: 0 },
   };
   // Camp goes on the creek bank. Of the spots along the middle half of the creek,
   // pick the one with the most paying ground within a short walk, so no season

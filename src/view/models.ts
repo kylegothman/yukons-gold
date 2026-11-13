@@ -103,10 +103,11 @@ export function makeMiner(variant: Look): MinerParts {
   torso.add(mesh(new THREE.CylinderGeometry(0.135, 0.105, 0.22, 12), shirt, 0, 0.19, 0).translateZ(0.005));
   torso.add(mesh(new THREE.SphereGeometry(0.135, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2), shirt, 0, 0.3, 0.005));
   torso.children.forEach(c => { c.scale.z = 0.72; });
-  torso.add(mesh(new THREE.BoxGeometry(0.2, 0.025, 0.16), mat(0x2e2219), 0, 0.085, 0));                       // belt
-  if (variant === 'boss') for (const x of [-0.06, 0.06]) torso.add(mesh(new THREE.BoxGeometry(0.03, 0.26, 0.2), pants, x, 0.22, 0)); // suspenders
-  if (variant === 0 || variant === 1 || variant === 2) torso.add(mesh(new THREE.BoxGeometry(0.265, 0.035, 0.215), mat(0xe6e84a, { emissive: 0x33340a }), 0, 0.2, 0)); // hi-vis band
-  if (variant === 'guard') torso.add(mesh(new THREE.BoxGeometry(0.04, 0.04, 0.01), mat(0xf2c14e, { metalness: 0.8, roughness: 0.3 }), -0.06, 0.26, 0.1));
+  const wrap = (m: THREE.Mesh) => { m.scale.z = 0.72; return m; };   // anything worn follows the body's oval, so nothing juts out
+  torso.add(wrap(mesh(new THREE.CylinderGeometry(0.109, 0.111, 0.024, 14), mat(0x2e2219), 0, 0.085, 0)));       // belt
+  if (variant === 'boss') for (const x of [-0.055, 0.055]) for (const z of [0.088, -0.082]) torso.add(mesh(new THREE.BoxGeometry(0.026, 0.2, 0.008), pants, x, 0.2, z)); // suspenders, flat to the shirt
+  if (variant === 0 || variant === 1 || variant === 2) torso.add(wrap(mesh(new THREE.CylinderGeometry(0.127, 0.121, 0.03, 14), mat(0xe6e84a, { emissive: 0x33340a }), 0, 0.2, 0.005))); // hi-vis band
+  if (variant === 'guard') torso.add(mesh(new THREE.BoxGeometry(0.04, 0.04, 0.01), mat(0xf2c14e, { metalness: 0.8, roughness: 0.3 }), -0.06, 0.26, 0.092));
   const arm = (x: number) => {
     const sh = new THREE.Group(); sh.position.set(x, 0.3, 0);
     sh.add(joint(shirt, 0.055), seg(shirt, 0.19, 0.048, 0.04));
